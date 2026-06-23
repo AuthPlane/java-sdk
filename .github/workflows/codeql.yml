@@ -1,0 +1,74 @@
+name: CodeQL
+
+# Static application security testing (SAST) for the Java sources across all
+# reactor modules (core, mcp, spring). Runs CodeQL's security-extended query
+# suite on pull requests, pushes to main, and a weekly schedule, uploading
+# results to the GitHub Security tab.
+#
+# Closes the OpenSSF Scorecard "SAST" gap: CodeQL statically analyzes the
+# first-party source, complementing the dependency-vulnerability scanning
+# (the security workflow) that runs separately.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Wednesdays 06:00 UTC
+    - cron: "0 6 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (java-kotlin)
+    # Code scanning (SARIF upload) requires GitHub Code Security, which is
+    # only available on public repos. Gate on visibility so the job only
+    # runs when the repo is public.
+    if: ${{ github.event.repository.visibility == 'public' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for CodeQL to upload its SARIF results to code scanning.
+      security-events: write
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          # Floor set by pom.xml's <java.version>21</java.version>.
+          java-version: "21"
+          cache: maven
+
+      # build-mode: manual — Java is compiled, so the extractor must observe a
+      # real build. Autobuild can't be trusted across a multi-module reactor,
+      # so we drive the compile explicitly below.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
+        with:
+          languages: java-kotlin
+          build-mode: manual
+          queries: security-extended
+
+      - name: Build modules
+        # Compile every reactor module so the extractor sees all classes.
+        # -DskipTests: CodeQL needs compilation, not the test suite (which would
+        # also require the external conformance catalog). The quality gates
+        # (spotless, checkstyle, jacoco) bind to the verify/test phases, so a
+        # plain `compile` does not trigger them.
+        run: mvn -B -DskipTests compile
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
+        with:
+          category: "/language:java-kotlin"
