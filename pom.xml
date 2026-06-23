@@ -1,0 +1,368 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>ai.authplane.sdk</groupId>
+  <artifactId>authplane-parent</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <name>Authplane Java SDK (parent)</name>
+  <description>
+    Aggregator POM for the Authplane Java SDK monorepo: the core SDK and its framework adapters.
+  </description>
+  <url>https://github.com/AuthPlane/java-sdk</url>
+
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <name>Authplane Team</name>
+      <organization>AuthPlane</organization>
+      <organizationUrl>https://github.com/AuthPlane</organizationUrl>
+    </developer>
+  </developers>
+
+  <scm>
+    <url>https://github.com/AuthPlane/java-sdk</url>
+    <connection>scm:git:https://github.com/AuthPlane/java-sdk.git</connection>
+    <developerConnection>scm:git:git@github.com:AuthPlane/java-sdk.git</developerConnection>
+  </scm>
+
+  <issueManagement>
+    <system>GitHub Issues</system>
+    <url>https://github.com/AuthPlane/java-sdk/issues</url>
+  </issueManagement>
+
+  <properties>
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <modules>
+    <module>core</module>
+    <module>mcp</module>
+    <module>spring</module>
+  </modules>
+
+  <distributionManagement>
+    <snapshotRepository>
+      <id>central</id>
+      <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+    </snapshotRepository>
+  </distributionManagement>
+
+  <!--
+    Shared dependency versions. Only third-party libraries used by more than
+    one reactor module belong here — module-specific dependencies (e.g.
+    nimbus-jose-jwt in core, the Spring stack in spring, Jetty/SLF4J in mcp)
+    keep their <version> in the child pom.
+  -->
+  <dependencyManagement>
+    <dependencies>
+      <!-- Test stack: JUnit, AssertJ, WireMock — used by all three modules -->
+      <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter</artifactId>
+        <version>5.10.3</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.assertj</groupId>
+        <artifactId>assertj-core</artifactId>
+        <version>3.27.7</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.wiremock</groupId>
+        <artifactId>wiremock-standalone</artifactId>
+        <version>3.13.2</version>
+        <scope>test</scope>
+      </dependency>
+      <!-- Mockito: used by adapter tests (mcp + spring); core uses plain JUnit -->
+      <dependency>
+        <groupId>org.mockito</groupId>
+        <artifactId>mockito-core</artifactId>
+        <version>5.23.0</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.mockito</groupId>
+        <artifactId>mockito-junit-jupiter</artifactId>
+        <version>5.23.0</version>
+        <scope>test</scope>
+      </dependency>
+      <!--
+        MCP Java SDK BOM — single source of truth for all mcp-* artifact
+        versions (mcp-core, mcp-json-jackson3, …). Scope is NOT declared here:
+        mcp/ consumes mcp-core as compile (transitive to its users) while
+        spring/ treats it as provided. Each module sets its own scope. The BOM
+        version is what spring-ai's mcp-spring-webmvc:2.0.0 pulls transitively,
+        keeping everything aligned.
+      -->
+      <dependency>
+        <groupId>io.modelcontextprotocol.sdk</groupId>
+        <artifactId>mcp-bom</artifactId>
+        <version>2.0.0</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <!-- Maven core plugins (alphabetical by artifactId) -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-checkstyle-plugin</artifactId>
+          <version>3.6.0</version>
+          <configuration>
+            <configLocation>${maven.multiModuleProjectDirectory}/checkstyle.xml</configLocation>
+            <consoleOutput>true</consoleOutput>
+            <linkXRef>false</linkXRef>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>3.15.0</version>
+          <configuration>
+            <release>21</release>
+          </configuration>
+        </plugin>
+        <!--
+          Centrally pinned so direct `help:evaluate` invocations from
+          release.yml / publish-maven.yml don't trigger a Central plugin
+          metadata scan (which would surface incompatible pre-release
+          versions and emit "Ignoring incompatible plugin version" warnings).
+        -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-help-plugin</artifactId>
+          <version>3.5.1</version>
+        </plugin>
+        <!--
+          maven-javadoc-plugin: shared config so direct invocations
+          (`javadoc:jar` from CI, the release profile's bound execution, and
+          any future site/report invocation) all use the same doclint policy.
+          `all,-missing` keeps real errors (broken @link, syntax, accessibility)
+          while suppressing the "no @param / no @return / no comment" noise on
+          framework adapter beans and builder fluent methods. Add proper
+          javadocs incrementally; do not let drive-by missing-doc warnings
+          drown out actionable errors.
+        -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-javadoc-plugin</artifactId>
+          <version>3.12.0</version>
+          <configuration>
+            <doclint>all,-missing</doclint>
+            <failOnWarnings>false</failOnWarnings>
+            <quiet>true</quiet>
+          </configuration>
+        </plugin>
+        <!--
+          maven-source-plugin pinned globally (not just in the release profile)
+          so direct invocations like `mvn verify source:jar` from CI resolve
+          a known-good version. Without this, Maven scans Central's plugin
+          metadata.xml and considers every published version including
+          4.0.0-beta-1, emitting an "Ignoring incompatible plugin version"
+          warning before falling back to a usable release.
+        -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-source-plugin</artifactId>
+          <version>3.4.0</version>
+        </plugin>
+        <!--
+          Shared Surefire config inherited by all reactor modules.
+
+          jdk.httpclient.allowRestrictedHeaders=host: required by SsrfSafeFetcher's
+          DNS-pinning. The fetcher resolves a URL to an IP, connects to the IP, and
+          sets the Host header explicitly so virtual-host routing on the server side
+          still works. Java 11+ blocks this header by default. SDK consumers must
+          set the same JVM property in production — see core/docs/user-guide.md.
+
+          conformance.report.dir: emit conformance reports at the reactor root
+          (alongside CHANGELOG / README) instead of the running module's basedir.
+          ConformanceRunState honors it; modules without conformance tests ignore it.
+        -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>3.5.5</version>
+          <configuration>
+            <systemPropertyVariables>
+              <jdk.httpclient.allowRestrictedHeaders>host</jdk.httpclient.allowRestrictedHeaders>
+              <conformance.report.dir>${maven.multiModuleProjectDirectory}</conformance.report.dir>
+            </systemPropertyVariables>
+          </configuration>
+        </plugin>
+
+        <!-- Release-only plugins (activated by the `release` profile) -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-gpg-plugin</artifactId>
+          <version>3.2.8</version>
+        </plugin>
+        <plugin>
+          <groupId>org.sonatype.central</groupId>
+          <artifactId>central-publishing-maven-plugin</artifactId>
+          <version>0.10.0</version>
+        </plugin>
+
+        <!-- Third-party plugins -->
+        <plugin>
+          <groupId>com.diffplug.spotless</groupId>
+          <artifactId>spotless-maven-plugin</artifactId>
+          <version>3.4.0</version>
+          <configuration>
+            <java>
+              <googleJavaFormat>
+                <version>1.27.0</version>
+                <style>AOSP</style>
+              </googleJavaFormat>
+              <removeUnusedImports/>
+              <importOrder>
+                <order>java,javax,jakarta,org,com,</order>
+              </importOrder>
+            </java>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>build-helper-maven-plugin</artifactId>
+          <version>3.6.1</version>
+        </plugin>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>exec-maven-plugin</artifactId>
+          <version>3.6.3</version>
+        </plugin>
+        <!--
+          versions-maven-plugin: pinned globally so direct `versions:set` /
+          `versions:set-property` invocations from cut-release.yml and
+          release.yml resolve the same version on every run.
+        -->
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>versions-maven-plugin</artifactId>
+          <version>2.21.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.jacoco</groupId>
+          <artifactId>jacoco-maven-plugin</artifactId>
+          <version>0.8.14</version>
+          <configuration>
+            <!--
+              Coverage exclusions inherited by every module's jacoco
+              execution (agent / report / check). Patterns match internal
+              class names (slash-separated packages, $ literal for inner
+              classes).
+
+              - example/**: runnable demo classes (MathServer) that ship
+                only as documentation; not part of the published API.
+              - *$Builder: builder inner classes are mostly fluent
+                setters with paths that only meaningfully execute inside
+                a Spring/MCP application, not from unit tests.
+            -->
+            <excludes>
+              <exclude>**/example/**</exclude>
+              <!--
+                Trailing * is required: the report goal matches against
+                relative class-file paths (which end in .class), while
+                the prepare-agent matches against runtime class names
+                (no .class). The trailing * matches both.
+              -->
+              <exclude>**/*$Builder*</exclude>
+            </excludes>
+          </configuration>
+        </plugin>
+        <!--
+          OWASP dependency-check: pinned globally so the on-demand
+          `org.owasp:dependency-check-maven:check` invocation — run locally or
+          via the manual Security Audit workflow — resolves a known-good version.
+        -->
+        <plugin>
+          <groupId>org.owasp</groupId>
+          <artifactId>dependency-check-maven</artifactId>
+          <version>12.1.0</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+
+  <!--
+    Release profile: signs and publishes artifacts to Maven Central.
+    Activated by `mvn -P release deploy` from CI when a GitHub Release is published.
+    Kept out of the default build so day-to-day `mvn verify` stays fast and does not
+    require a GPG key.
+  -->
+  <profiles>
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>true</autoPublish>
+              <waitUntil>published</waitUntil>
+            </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <goals><goal>jar-no-fork</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                <goals><goal>jar</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals><goal>sign</goal></goals>
+                <configuration>
+                  <gpgArguments>
+                    <arg>--pinentry-mode</arg>
+                    <arg>loopback</arg>
+                  </gpgArguments>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

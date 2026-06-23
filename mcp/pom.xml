@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>ai.authplane.sdk</groupId>
+    <artifactId>authplane-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>authplane-mcp</artifactId>
+  <packaging>jar</packaging>
+
+  <name>Authplane MCP Java Adapter</name>
+  <description>
+    MCP Java SDK adapter for Authplane JWT validation.
+    Wires authplane-sdk into the MCP Java SDK's servlet transport
+    via ServerTransportSecurityValidator and McpTransportContextExtractor.
+  </description>
+
+  <dependencies>
+    <!-- Core Authplane SDK — all JWT validation logic lives here -->
+    <dependency>
+      <groupId>ai.authplane.sdk</groupId>
+      <artifactId>authplane-sdk</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <!--
+      MCP Java SDK transport layer (version managed in parent pom).
+      Compile scope: users of authplane-mcp always need mcp-core on their
+      classpath; declaring it here avoids forcing them to repeat the
+      dependency.
+    -->
+    <dependency>
+      <groupId>io.modelcontextprotocol.sdk</groupId>
+      <artifactId>mcp-core</artifactId>
+    </dependency>
+
+    <!--
+      Jackson JSON mapper for mcp-core (discovered via ServiceLoader).
+      Required at runtime by any application using mcp-core. Version
+      managed in parent pom.
+    -->
+    <dependency>
+      <groupId>io.modelcontextprotocol.sdk</groupId>
+      <artifactId>mcp-json-jackson3</artifactId>
+    </dependency>
+
+    <!-- Embedded Jetty — only needed to run MathServer example standalone -->
+    <dependency>
+      <groupId>org.eclipse.jetty.ee10</groupId>
+      <artifactId>jetty-ee10-servlet</artifactId>
+      <version>12.1.9</version>
+      <optional>true</optional>
+    </dependency>
+
+    <!-- SLF4J simple logger — only needed to run MathServer example standalone -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>2.0.17</version>
+      <optional>true</optional>
+    </dependency>
+
+    <!-- Test dependencies — version and scope managed in the parent pom -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-junit-jupiter</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.wiremock</groupId>
+      <artifactId>wiremock-standalone</artifactId>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <!-- Ship the Apache-2.0 LICENSE at the jar's META-INF/ root. -->
+      <resource>
+        <directory>${project.basedir}</directory>
+        <includes><include>LICENSE</include></includes>
+        <targetPath>META-INF</targetPath>
+      </resource>
+    </resources>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <showWarnings>true</showWarnings>
+          <compilerArgs>
+            <arg>-Xlint:all</arg>
+            <arg>-Xlint:-processing</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <argLine>@{argLine} -XX:+EnableDynamicAgentLoading --add-opens java.base/java.lang=ALL-UNNAMED</argLine>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals><goal>prepare-agent</goal></goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>test</phase>
+            <goals><goal>report</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals><goal>check</goal></goals>
+            <phase>verify</phase>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-checkstyle-plugin</artifactId>
+        <configuration>
+          <failsOnError>false</failsOnError>
+          <failOnViolation>false</failOnViolation>
+        </configuration>
+        <executions>
+          <execution>
+            <id>checkstyle-check</id>
+            <phase>verify</phase>
+            <goals><goal>check</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <!--
+          exec:exec forks a real JVM — required so ServiceLoader picks up
+          mcp-json-jackson3 from the normal classpath rather than Maven's
+          custom classloader.  Run with: mvn exec:exec@run
+        -->
+        <configuration>
+          <mainClass>ai.authplane.sdk.mcp.example.MathServer</mainClass>
+        </configuration>
+        <executions>
+          <execution>
+            <id>run</id>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <executable>java</executable>
+              <arguments>
+                <argument>-classpath</argument>
+                <classpath/>
+                <argument>ai.authplane.sdk.mcp.example.MathServer</argument>
+              </arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

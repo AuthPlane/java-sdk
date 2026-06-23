@@ -1,0 +1,60 @@
+name: Security Audit
+
+# Runs OWASP dependency-check against the Maven reactor, checking the
+# resolved dependency tree for known CVEs.
+#
+# `CVSS >= 7` fails the build (high + critical). Lower severities are
+# reported to the HTML report but don't block.
+#
+# Manual-only: on a cold cache the plugin downloads the full NVD CVE
+# database (~356k records, hundreds of MB) — too costly to run on every
+# PR/push on GitHub-hosted runners (no NVD API key → rate-limited, ~30 min).
+# Run it on demand from the Actions tab, or locally:
+#   mvn org.owasp:dependency-check-maven:check
+# (Removed automatic triggers: pull_request, push(main), schedule.)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Cache OWASP NVD database
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.m2/repository/org/owasp/dependency-check-data
+          key: dependency-check-data-${{ runner.os }}
+          restore-keys: dependency-check-data-
+
+      - name: Run OWASP dependency-check
+        # --nvdApiKey speeds up the NVD feed download but is optional.
+        # --failBuildOnCVSS 7 fails on high + critical (CVSSv3 >= 7).
+        run: |
+          mvn -B -ntp org.owasp:dependency-check-maven:check \
+            -DfailBuildOnCVSS=7 \
+            -DassemblyAnalyzerEnabled=false
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-check-report
+          path: |
+            target/dependency-check-report.html
+            **/target/dependency-check-report.html
+          if-no-files-found: warn
+          retention-days: 14

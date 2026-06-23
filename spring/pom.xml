@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>ai.authplane.sdk</groupId>
+    <artifactId>authplane-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>authplane-spring</artifactId>
+  <packaging>jar</packaging>
+
+  <name>Authplane Spring Security Adapter</name>
+  <description>
+    Bridges authplane-sdk into Spring Security's OAuth2 resource server.
+    Provides AuthplaneAuthentication (a rich principal with scope helpers) and
+    AuthplaneAuthenticationProvider (wires AuthplaneVerifier into the filter chain).
+  </description>
+
+  <dependencies>
+    <!-- Core Authplane JWT validation — all verification logic lives here -->
+    <dependency>
+      <groupId>ai.authplane.sdk</groupId>
+      <artifactId>authplane-sdk</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <!--
+      Spring Security OAuth2 resource server — provided by the host application.
+      Brings in spring-security-core (AbstractAuthenticationToken, AccessDeniedException)
+      and spring-security-oauth2-core (OAuth2AuthenticationException, OAuth2Error)
+      transitively.
+    -->
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-oauth2-resource-server</artifactId>
+      <version>7.0.0</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!--
+      Spring Security config — provided by the host application.
+      Required by AuthplaneSecurityConfig (HttpSecurity, EnableWebSecurity,
+      WebSecurityCustomizer). spring-security-oauth2-resource-server does not pull
+      spring-security-config transitively.
+    -->
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-config</artifactId>
+      <version>7.0.0</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!--
+      Spring MVC — provided by the host application.
+      Required by AuthplaneSecurityConfig (RouterFunction, RouterFunctions,
+      ServerResponse). Not needed if you only use the core adapter classes
+      (AuthplaneAuthentication, AuthplaneAuthenticationProvider).
+    -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-webmvc</artifactId>
+      <version>7.0.1</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!--
+      Jakarta Servlet API — provided by the servlet container.
+      Required by AuthplaneSecurityConfig (HttpServletResponse).
+    -->
+    <dependency>
+      <groupId>jakarta.servlet</groupId>
+      <artifactId>jakarta.servlet-api</artifactId>
+      <version>6.1.0</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!--
+      Spring AI WebMVC transport — provided by the host application.
+      Required by AuthplaneMcpServerConfig (WebMvcStreamableServerTransportProvider)
+      and AuthplaneMcpServerAdapter (ServerRequest).
+    -->
+    <dependency>
+      <groupId>org.springframework.ai</groupId>
+      <artifactId>mcp-spring-webmvc</artifactId>
+      <version>2.0.0</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!--
+      MCP SDK core — provided by the host application. Version managed in
+      parent pom; scope is provided here (vs compile in the mcp adapter).
+    -->
+    <dependency>
+      <groupId>io.modelcontextprotocol.sdk</groupId>
+      <artifactId>mcp-core</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- Test dependencies — version and scope managed in the parent pom -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-junit-jupiter</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.wiremock</groupId>
+      <artifactId>wiremock-standalone</artifactId>
+    </dependency>
+
+    <!--
+      Jackson JSON mapper for mcp-core (discovered via ServiceLoader).
+      Required at runtime by tests that exercise McpTransportContext.
+      Version managed in parent; scope is test-only here.
+    -->
+    <dependency>
+      <groupId>io.modelcontextprotocol.sdk</groupId>
+      <artifactId>mcp-json-jackson3</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <repositories>
+    <repository>
+      <id>spring-milestones</id>
+      <name>Spring Milestones</name>
+      <url>https://repo.spring.io/milestone</url>
+      <snapshots><enabled>false</enabled></snapshots>
+    </repository>
+  </repositories>
+
+  <build>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <!-- Ship the Apache-2.0 LICENSE at the jar's META-INF/ root. -->
+      <resource>
+        <directory>${project.basedir}</directory>
+        <includes><include>LICENSE</include></includes>
+        <targetPath>META-INF</targetPath>
+      </resource>
+    </resources>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <argLine>@{argLine} -XX:+EnableDynamicAgentLoading --add-opens java.base/java.lang=ALL-UNNAMED</argLine>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals><goal>prepare-agent</goal></goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>test</phase>
+            <goals><goal>report</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals><goal>check</goal></goals>
+            <phase>verify</phase>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-checkstyle-plugin</artifactId>
+        <configuration>
+          <failsOnError>false</failsOnError>
+          <failOnViolation>false</failOnViolation>
+        </configuration>
+        <executions>
+          <execution>
+            <id>checkstyle-check</id>
+            <phase>verify</phase>
+            <goals><goal>check</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+</project>

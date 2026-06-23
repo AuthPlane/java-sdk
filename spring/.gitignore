@@ -1,0 +1,14 @@
+target/
+
+# Demo secrets
+demo/.env
+
+# IDE files
+.classpath
+.project
+.settings/
+.idea/
+*.iml
+
+# Compiled class files alongside sources (from direct javac runs)
+**/*.class

@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.0.0</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>ai.authplane.sdk</groupId>
+  <artifactId>authplane-spring-demo</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <name>Authplane Spring Demo</name>
+  <description>
+    Self-contained demo of the authplane-spring adapter.
+    Runs a Calculator MCP server over Spring AI's WebMVC transport with JWT auth
+    and token introspection, in two profiles:
+      -Psecurity  — Spring Security filter-chain approach
+      -Ptransport — MCP transport-level approach (no Spring Security)
+    Not part of the adapter's own build.
+  </description>
+
+  <properties>
+    <!-- Bumped by the cut-release workflow alongside the default branch's SNAPSHOT version. -->
+    <authplane.sdk.version>1.0.0-SNAPSHOT</authplane.sdk.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-bom</artifactId>
+        <version>2.0.0</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- Spring AI MCP server over HTTP (servlet/WebMVC transport) -->
+    <dependency>
+      <groupId>org.springframework.ai</groupId>
+      <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
+    </dependency>
+
+    <!-- Authplane Spring adapter — install to local Maven repo with run.sh -->
+    <dependency>
+      <groupId>ai.authplane.sdk</groupId>
+      <artifactId>authplane-spring</artifactId>
+      <version>${authplane.sdk.version}</version>
+    </dependency>
+
+    <!-- OAuth2 resource server filter chain (bearer token extraction + 401 responses) -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <version>3.4.0</version>
+        <configuration>
+          <java>
+            <googleJavaFormat>
+              <version>1.27.0</version>
+              <style>AOSP</style>
+            </googleJavaFormat>
+            <removeUnusedImports/>
+            <importOrder>
+              <order>java,javax,jakarta,org,com,</order>
+            </importOrder>
+          </java>
+        </configuration>
+        <executions>
+          <execution>
+            <goals><goal>check</goal></goals>
+            <phase>verify</phase>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <!-- mvn spring-boot:run -Psecurity  — Spring Security filter-chain approach -->
+    <profile>
+      <id>security</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+            <configuration>
+              <mainClass>ai.authplane.sdk.spring.security.demo.MathMcpServerApplication</mainClass>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <!-- mvn spring-boot:run -Ptransport  — MCP transport-level approach (no Spring Security) -->
+    <profile>
+      <id>transport</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+            <configuration>
+              <mainClass>ai.authplane.sdk.spring.mcp.demo.MathMcpTransportApplication</mainClass>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+
+  <repositories>
+    <repository>
+      <id>spring-milestones</id>
+      <name>Spring Milestones</name>
+      <url>https://repo.spring.io/milestone</url>
+      <snapshots><enabled>false</enabled></snapshots>
+    </repository>
+    <repository>
+      <id>central-portal-snapshots</id>
+      <name>Central Portal Snapshots</name>
+      <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+      <releases><enabled>false</enabled></releases>
+    </repository>
+  </repositories>
+
+</project>

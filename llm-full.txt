@@ -1,0 +1,126 @@
+# Authplane Java SDK — Complete LLM Reference
+
+> Maven multi-module project for protecting MCP servers and OAuth 2.1
+> resource servers with tokens issued by an Authplane authorization server.
+> This repository contains the framework-agnostic SDK (`core/`) and two
+> framework adapters (`mcp/`, `spring/`) as independent Maven artifacts
+> under the `ai.authplane` group.
+
+## When To Use This Repository
+
+Use this repo when you need to:
+- implement or adjust Java OAuth 2.1 discovery, metadata, JWKS, verification,
+  or DPoP behavior
+- evolve token client flows (client credentials, token exchange,
+  introspection, revocation) and their error/retry semantics
+- wire the verifier into the official MCP Java SDK's servlet transport
+  (`mcp/`)
+- wire the verifier into Spring Security's OAuth2 resource server filter
+  chain (`spring/`)
+
+## Repository Structure
+
+| Path | Purpose |
+|---|---|
+| `pom.xml` | aggregator POM listing the three modules |
+| `checkstyle.xml` | shared Checkstyle rules used by every module |
+| `core/` | core SDK module — `ai.authplane.sdk:authplane-sdk` |
+| `core/src/main/java/ai/authplane/sdk/core/` | public client, verifier, JWKS cache, errors |
+| `core/src/conformance/java/ai/authplane/sdk/core/conformance/` | RFC 9728 conformance harness |
+| `mcp/` | MCP adapter — `ai.authplane.sdk:authplane-mcp` |
+| `mcp/src/main/java/ai/authplane/sdk/mcp/` | MCP Java SDK wiring |
+| `spring/` | Spring Security adapter — `ai.authplane.sdk:authplane-spring` |
+| `spring/src/main/java/ai/authplane/sdk/spring/` | filter chain + resource server configuration |
+| `scripts/` | end-to-end test helpers |
+
+## Layering Rules (Important)
+
+1. Protocol verification, JWKS fetching, caching, resilience, and all AS
+   interaction live in `core/`.
+2. Adapter modules (`mcp/`, `spring/`) must stay thin: they translate
+   framework request contexts into `core` verifier calls and map `core`
+   exceptions into framework-specific responses.
+3. Do not duplicate verifier or token-parsing logic across modules.
+4. Keep exception types and `WWW-Authenticate` header behavior consistent
+   across adapters.
+5. Each module is published independently under the same `1.0.0-SNAPSHOT`
+   version during development; adapter modules depend on
+   `ai.authplane.sdk:authplane-sdk` via Maven coordinates.
+
+## Quick Start
+
+```bash
+cd java-sdk
+mvn -B verify            # build, test, and checkstyle every module
+```
+
+## API Examples
+
+### 1) Discovery + verify token (core)
+
+```java
+AuthplaneClient client = AuthplaneClient.builder("https://auth.example.com").build().get();
+AuthplaneResource verifier = client.resource("https://api.example.com", List.of("tools/read"));
+VerifiedClaims claims = verifier.verify(token).get().claims();
+claims.requireScope("tools/read");
+```
+
+### 2) Token client flow (core)
+
+```java
+AuthplaneClient client = AuthplaneClient.builder("https://auth.example.com")
+        .authProvider(new ASCredentials("client-id", "client-secret"))
+        .build()
+        .get();
+TokenResponse token = client.clientCredentials(List.of("tools/read"), List.of()).get();
+```
+
+### 3) MCP adapter (`mcp/`)
+
+```java
+// See mcp/README.md for the full wiring into the MCP Java SDK's servlet transport.
+```
+
+### 4) Spring Security adapter (`spring/`)
+
+```java
+// See spring/README.md for the full resource server filter chain wiring.
+```
+
+## Practical Example Locations
+
+| Example Type | Location |
+|---|---|
+| SDK usage snippets | `core/README.md` |
+| MCP setup snippets | `mcp/README.md`, `mcp/demo/` |
+| Spring setup snippets | `spring/README.md`, `spring/demo/` |
+
+## Validation Commands
+
+- Full repo: `mvn -B verify`
+- Core only: `mvn -B -pl core verify`
+- MCP module: `mvn -B -pl mcp verify`
+- Spring module: `mvn -B -pl spring verify`
+- Spotless / Checkstyle / JaCoCo gates are wired into `verify`.
+
+## Typical AI-Agent Tasks
+
+- extend core auth/protocol behavior with backwards compatibility
+- improve error mapping or retry semantics
+- add focused tests for OAuth 2.1 and DPoP edge cases
+- tune adapter challenge/header behavior on unauthorized requests
+- align module READMEs, demos, and compatibility docs with the latest APIs
+
+## Guardrails
+
+- respect module boundaries and naming conventions
+- all verifier/protocol code stays in `core/`; adapters are thin
+- keep API changes deliberate and documented
+- add tests for every behavior change
+- do not skip Spotless / Checkstyle gates
+
+## References
+
+- Authplane authorization server: https://github.com/AuthPlane/authserver
+- Conformance catalog: https://github.com/AuthPlane/conformance
+- License: Apache-2.0 (`LICENSE`)

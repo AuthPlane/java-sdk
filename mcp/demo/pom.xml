@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>ai.authplane.sdk</groupId>
+  <artifactId>authplane-mcp-demo</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <name>Authplane MCP Demo</name>
+  <description>
+    Self-contained demo of the authplane-mcp adapter.
+    Runs a Calculator MCP server with JWT auth and token introspection.
+    Not part of the adapter's own build — dependencies here (Jetty, slf4j-simple)
+    do not affect authplane-mcp consumers.
+  </description>
+
+  <properties>
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Bumped by the cut-release workflow alongside the default branch's SNAPSHOT version. -->
+    <authplane.sdk.version>1.0.0-SNAPSHOT</authplane.sdk.version>
+  </properties>
+
+  <dependencies>
+    <!-- Authplane MCP adapter — install to local Maven repo with run.sh -->
+    <dependency>
+      <groupId>ai.authplane.sdk</groupId>
+      <artifactId>authplane-mcp</artifactId>
+      <version>${authplane.sdk.version}</version>
+    </dependency>
+
+    <!-- Embedded HTTP server (optional in authplane-mcp; required here) -->
+    <dependency>
+      <groupId>org.eclipse.jetty.ee10</groupId>
+      <artifactId>jetty-ee10-servlet</artifactId>
+      <version>12.1.9</version>
+    </dependency>
+
+    <!-- Logging backend (optional in authplane-mcp; required here) -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>2.0.17</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.15.0</version>
+        <configuration>
+          <release>21</release>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <version>3.4.0</version>
+        <configuration>
+          <java>
+            <googleJavaFormat>
+              <version>1.27.0</version>
+              <style>AOSP</style>
+            </googleJavaFormat>
+            <removeUnusedImports/>
+            <importOrder>
+              <order>java,javax,jakarta,org,com,</order>
+            </importOrder>
+          </java>
+        </configuration>
+        <executions>
+          <execution>
+            <goals><goal>check</goal></goals>
+            <phase>verify</phase>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!--
+        exec:exec forks a real JVM so that ServiceLoader discovers
+        mcp-json-jackson3 from the normal classpath rather than Maven's
+        own classloader.  Run with: mvn exec:exec@run
+      -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.6.3</version>
+        <executions>
+          <execution>
+            <id>run</id>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <executable>java</executable>
+              <arguments>
+                <argument>-classpath</argument>
+                <classpath/>
+                <argument>ai.authplane.sdk.mcp.demo.MathServer</argument>
+              </arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

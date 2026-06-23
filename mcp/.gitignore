@@ -1,0 +1,8 @@
+target/
+.classpath
+.project
+.settings/
+*.class
+
+# Demo secrets
+demo/.env

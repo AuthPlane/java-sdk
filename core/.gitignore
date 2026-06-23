@@ -1,0 +1,9 @@
+target/
+.classpath
+.project
+.settings/
+conformance-report.json
+conformance-report.md
+.worktrees/
+AUDIT_REPORT.md
+.checkstyle

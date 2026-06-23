@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # JDK matrix is a list so we can expand as new LTS releases land.
+        # Current floor: 21 — set by pom.xml's <java.version>21</java.version>.
+        java-version: ["21"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Uses the runner's built-in git instead of actions/checkout: equivalent
+      # trust for a public repo (AuthPlane/conformance), no third-party action
+      # surface to SHA-pin. Keeps the catalog outside the workspace so
+      # release.yml's `git add -A` cannot stage it as an embedded gitlink.
+      - name: Check out shared conformance catalog (outside workspace)
+        run: |
+          git -c advice.detachedHead=false clone --depth=1 \
+            https://github.com/AuthPlane/conformance.git \
+            "${{ runner.temp }}/conformance"
+
+      - name: Setup Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java-version }}
+          cache: maven
+
+      - name: Verify and validate publish artifacts
+        # Single reactor pass covering all three modules (core, mcp, spring).
+        # - verify: compile + run unit tests + conformance tests + package
+        #   + run bound plugins (checkstyle, jacoco, etc.)
+        # - source:jar / javadoc:jar: confirms the artifacts that will be
+        #   published to Maven Central can be built.
+        # Must be one mvn invocation: `source:jar` / `javadoc:jar` are run
+        # directly (no phase), so splitting them off would leave the second
+        # invocation unable to resolve inter-module deps from ~/.m2 (we
+        # don't install).
+        #
+        # CONFORMANCE_CATALOG_PATH points at the catalog checked out in the
+        # previous step. This is the explicit override ConformanceCatalogPaths
+        # checks first, avoiding any path-resolution ambiguity.
+        env:
+          CONFORMANCE_CATALOG_PATH: ${{ runner.temp }}/conformance/oauth-sdk-conformance-catalog.yaml
+        run: mvn -B verify source:jar javadoc:jar

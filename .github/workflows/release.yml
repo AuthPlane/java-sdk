@@ -1,0 +1,312 @@
+name: Release
+
+# Step 2 of the single-branch release: take the stabilized release/v* or
+# hotfix/v* branch, run tests against the carried -SNAPSHOT version,
+# strip the suffix into the final version, commit on the source branch,
+# tag vX.Y.Z, atomic-push branch + tag, create the GitHub Release, then
+# delete the source branch on success.
+#
+# Branch conventions:
+#   - release/v<X.Y.Z>: current-line release off the default branch.
+#   - hotfix/v<X.Y.Z>: patch for an older minor line. The workflow refuses
+#     dispatch unless (branch.major, branch.minor) is strictly older than
+#     the default branch's latest v<X.Y.Z> tag — use release/v* for
+#     current-line patches.
+#
+# Maven Central publication is handled separately by `publish-maven.yml`,
+# triggered by the tag push. This keeps the Central credentials + GPG key
+# scoped to a tag-only GitHub environment, and binds the deploy identity
+# to the tag ref itself.
+#
+# The artifact eventually published to Central is built from the tagged
+# commit on the release/hotfix branch — never from the default branch.
+# The default branch already advanced to the next dev SNAPSHOT when the
+# release branch was cut.
+#
+# Trigger: maintainer dispatches from the Actions UI with a release/v*
+# or hotfix/v* branch selected. Branch name is the source of truth for
+# the version that will become the tag; POM version stem must match.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: 'Dry run: run tests, strip -SNAPSHOT, commit + build locally; skip atomic push, GitHub Release, and branch deletion.'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Refuse if not dispatched from a release/v* or hotfix/v* branch
+        run: |
+          ref="${{ github.ref_name }}"
+          if [[ ! "$ref" =~ ^(release|hotfix)/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::This workflow must be dispatched from a release/v<X.Y.Z> or hotfix/v<X.Y.Z> branch (got: $ref)"
+            exit 1
+          fi
+          echo "Dispatched from $ref"
+
+      # Fail fast if the AuthPlane Release Bot App secrets aren't available
+      # (e.g. a fork or unconfigured clone). The token-mint step would
+      # otherwise fail with a generic actions/create-github-app-token error.
+      - name: Refuse if Release Bot secrets are missing
+        env:
+          APP_ID: ${{ secrets.RELEASE_BOT_APP_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$APP_ID" || -z "$PRIVATE_KEY" ]]; then
+            echo "::error::Release Bot App secrets (RELEASE_BOT_APP_ID / RELEASE_BOT_PRIVATE_KEY) are unavailable in this run. They live as AuthPlane org secrets scoped to the OSS release repo; forks and unconfigured clones cannot run release.yml end-to-end and must follow the manual procedure in RELEASE_GUIDE.md → Troubleshooting → Tag push blocked by branch/tag ruleset."
+            exit 1
+          fi
+
+      # Tag/branch rulesets reject GHA bot pushes for v* tags. Mint a
+      # short-lived installation token for the AuthPlane Release Bot App
+      # (bypass actor on the ruleset) and pass it to checkout so the
+      # atomic push and source-branch delete use the App's identity.
+      - name: Mint release-bot token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+      - name: Check out repo with full history and all tags
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+          token: ${{ steps.app_token.outputs.token }}
+
+      # Uses the runner's built-in git instead of actions/checkout: equivalent
+      # trust for a public repo (AuthPlane/conformance), no third-party action
+      # surface to SHA-pin. Keeps the catalog outside the workspace so the
+      # `git add -A` below cannot stage it as an embedded gitlink.
+      - name: Check out shared conformance catalog (outside workspace)
+        run: |
+          git -c advice.detachedHead=false clone --depth=1 \
+            https://github.com/AuthPlane/conformance.git \
+            "${{ runner.temp }}/conformance"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+        # No `server-*` or `gpg-*` configured — this workflow no longer
+        # publishes to Central. publish-maven.yml handles the credentialed
+        # deploy, gated by the `maven-central` environment's tag-only policy.
+
+      - name: Read version from POM and validate against branch name
+        # Release branch carries `<release>-SNAPSHOT` from the cut. Strip the
+        # suffix to derive the final release version, then validate it
+        # matches the branch name (release/v<release> or hotfix/v<release>).
+        id: version
+        run: |
+          pom_version=$(mvn -B -ntp -q help:evaluate -Dexpression=project.version -DforceStdout --non-recursive)
+          if [[ "$pom_version" != *-SNAPSHOT ]]; then
+            echo "::error::Release branch POM version must end with -SNAPSHOT (got: $pom_version)"
+            exit 1
+          fi
+          version="${pom_version%-SNAPSHOT}"
+          branch_version="${GITHUB_REF_NAME##*/v}"
+          if [[ "$version" != "$branch_version" ]]; then
+            echo "::error::Branch name version ($branch_version) does not match POM version stem ($version, from $pom_version)"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Refuse if tag already exists
+        run: |
+          if git ls-remote --exit-code --tags origin "${{ steps.version.outputs.tag }}" >/dev/null; then
+            echo "::error::Tag ${{ steps.version.outputs.tag }} already exists. Aborting."
+            exit 1
+          fi
+
+      # hotfix/v* is reserved for patches to an older minor line. Refuse
+      # dispatch if the branch's (major, minor) is not strictly less than
+      # the default branch's latest released (major, minor). Current-line
+      # patches should use release/v*, not hotfix/v*.
+      - name: Refuse if hotfix branch is not strictly an older-line patch
+        if: startsWith(github.ref_name, 'hotfix/')
+        run: |
+          default="${{ github.event.repository.default_branch }}"
+          git fetch origin "$default" --tags --no-recurse-submodules
+          if ! main_tag=$(git describe --tags --abbrev=0 "origin/$default" 2>/dev/null); then
+            echo "::error::Cannot determine $default's latest tag — has a release ever shipped? If not, use release/v* for the first release."
+            exit 1
+          fi
+          echo "$default's latest tag: $main_tag"
+
+          if ! [[ "$main_tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::$default's latest tag '$main_tag' does not match vX.Y.Z."
+            exit 1
+          fi
+          main_major="${BASH_REMATCH[1]}"
+          main_minor="${BASH_REMATCH[2]}"
+
+          v="${{ steps.version.outputs.version }}"
+          [[ "$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]
+          br_major="${BASH_REMATCH[1]}"
+          br_minor="${BASH_REMATCH[2]}"
+
+          if (( br_major > main_major )) || { (( br_major == main_major )) && (( br_minor >= main_minor )); }; then
+            echo "::error::hotfix/v${v} is on line v${br_major}.${br_minor}, which is not strictly older than $default's line v${main_major}.${main_minor}."
+            echo "::error::Current-line patches must use release/v*, not hotfix/v*."
+            exit 1
+          fi
+          echo "Confirmed older-line patch: v${br_major}.${br_minor} < v${main_major}.${main_minor}"
+
+      - name: Verify CHANGELOG entry exists for this version
+        run: |
+          if ! grep -q "^## \[${{ steps.version.outputs.version }}\]" CHANGELOG.md 2>/dev/null; then
+            echo "::error::CHANGELOG.md has no entry for ## [${{ steps.version.outputs.version }}]"
+            exit 1
+          fi
+
+      - name: Configure git author
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Tests run against the carried -SNAPSHOT version (reactor + demo
+      # POMs already aligned at cut time). The version strip below ships
+      # in the same release commit as the tag — no test re-run on the
+      # final version. Setting the final version before tests would break
+      # demo resolution, since the demo POMs reference the SDK via
+      # ${authplane.sdk.version} and the final-version artifacts do not
+      # exist in any repo until publish-maven.yml runs.
+      - name: Run verify against -SNAPSHOT
+        env:
+          CONFORMANCE_CATALOG_PATH: ${{ runner.temp }}/conformance/oauth-sdk-conformance-catalog.yaml
+        run: mvn -B -ntp verify source:jar javadoc:jar -Dmaven.javadoc.failOnError=false
+
+      # Strip -SNAPSHOT to the final release version. Reactor modules (parent
+      # + core, mcp, spring) via versions:set; demo POMs separately because
+      # they are not part of the parent reactor.
+      - name: Strip -SNAPSHOT to final release version
+        run: |
+          mvn -B -ntp versions:set \
+            -DnewVersion=${{ steps.version.outputs.version }} \
+            -DprocessAllModules \
+            -DgenerateBackupPoms=false
+          for demo in mcp/demo spring/demo; do
+            (cd "$demo" && mvn -B -ntp versions:set-property \
+              -Dproperty=authplane.sdk.version \
+              -DnewVersion=${{ steps.version.outputs.version }} \
+              -DgenerateBackupPoms=false)
+          done
+
+      - name: Commit release version on the source branch
+        run: |
+          git add -A
+          git commit -m "release: ${{ steps.version.outputs.version }}"
+
+      - name: Capture release commit SHA
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create annotated tag locally
+        run: |
+          git tag -a "${{ steps.version.outputs.tag }}" \
+            -m "Release ${{ steps.version.outputs.tag }}"
+
+      - name: Dry run short-circuit notice
+        if: ${{ inputs.dryRun }}
+        run: |
+          echo "::notice::Dry run — skipping atomic push of branch + tag, GitHub Release, and branch deletion. publish-maven.yml would be triggered by the tag push on a real run. Release commit SHA (would-be): ${{ steps.sha.outputs.sha }}"
+
+      # ---------- From here on, changes are written to the remote. ----------
+
+      # Atomic push of branch + tag: either both land or neither does. Avoids
+      # the half-published state where the tag exists but the source branch
+      # tip is stale, or vice versa.
+      - name: Atomic push of source branch and tag
+        if: ${{ !inputs.dryRun }}
+        run: |
+          git push --atomic origin "$GITHUB_REF_NAME" "${{ steps.version.outputs.tag }}"
+          echo "::notice::Released commit: ${{ steps.sha.outputs.sha }}"
+
+      - name: Extract CHANGELOG entry for release notes
+        if: ${{ !inputs.dryRun }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          sha="${{ steps.sha.outputs.sha }}"
+          {
+            echo "_Released commit: \`$sha\`_"
+            echo ""
+            awk "/^## \[$version\]/{flag=1;next} /^## \[/{flag=0} flag" CHANGELOG.md
+          } > /tmp/release-notes.md
+          # If CHANGELOG extraction returned nothing beyond the SHA line, add a fallback.
+          if [[ $(wc -l < /tmp/release-notes.md) -le 2 ]]; then
+            echo "See CHANGELOG.md for details." >> /tmp/release-notes.md
+          fi
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.dryRun }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes-file /tmp/release-notes.md
+
+      # Delete the source branch (release/v* or hotfix/v*) on success. The
+      # branch ruleset must allow the bot to delete. If this fails, warn
+      # loudly but do not fail the workflow — the release is already live.
+      - name: Delete source branch on remote
+        if: ${{ !inputs.dryRun }}
+        continue-on-error: true
+        id: delete
+        run: |
+          git push origin --delete "$GITHUB_REF_NAME"
+
+      - name: Warn if delete failed
+        if: ${{ !inputs.dryRun && steps.delete.outcome == 'failure' }}
+        run: |
+          echo "::warning::Source branch delete failed. Run manually: git push origin --delete $GITHUB_REF_NAME"
+
+      - name: Summary
+        if: always()
+        run: |
+          v="${{ steps.version.outputs.version }}"
+          sha="${{ steps.sha.outputs.sha }}"
+          if [[ "${{ inputs.dryRun }}" == "true" ]]; then
+            {
+              echo "### Dry run complete"
+              echo ""
+              echo "- **Version**: \`$v\` (not published)"
+              echo "- **Would-be released commit**: \`$sha\`"
+              echo "- Tests, version strip, commit, tag — all succeeded."
+              echo "- Atomic push, GitHub Release, branch delete, and Maven Central deploy (via publish-maven.yml) were skipped."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Release tag pushed"
+              echo ""
+              echo "- **Version**: \`$v\`"
+              echo "- **Released commit**: \`$sha\`"
+              echo "- **Tag**: \`v$v\` (pushed — triggers \`publish-maven.yml\`)"
+              echo "- **GitHub Release**: ${{ github.server_url }}/${{ github.repository }}/releases/tag/v$v"
+              echo "- **Maven Central (pending)**: watch \`publish-maven.yml\` run — it deploys the three artifacts from the tag ref."
+              if [[ "${{ steps.delete.outcome }}" != "success" ]]; then
+                echo ""
+                echo "⚠️ **Branch delete failed — run manually:** \`git push origin --delete $GITHUB_REF_NAME\`"
+              fi
+              echo ""
+              echo "**Follow-up:**"
+              echo "- If any commits on this branch should reach the default branch, dispatch **Backport fixes** with \`fromBranch=v$v\` (the tag, not the branch — the branch is deleted)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

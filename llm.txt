@@ -1,0 +1,72 @@
+# Authplane Java SDK — LLM Guide
+
+Short guide. For complete context and detailed examples, read `llm-full.txt`.
+
+## What this repo provides
+
+A Maven multi-module project containing the framework-agnostic Authplane SDK
+and two framework adapters for protecting MCP servers and OAuth 2.1 resource
+servers with tokens issued by an Authplane authorization server.
+
+Modules (published as separate Maven artifacts under `ai.authplane`):
+
+- `core/` — `ai.authplane.sdk:authplane-sdk` — framework-agnostic JWT
+  validation, JWKS caching, DPoP, introspection, RFC 8693 token exchange,
+  RFC 9728 PRM. No servlet or Spring dependency.
+- `mcp/` — `ai.authplane.sdk:authplane-mcp` — thin adapter for the official
+  MCP Java SDK's servlet transport.
+- `spring/` — `ai.authplane.sdk:authplane-spring` — bridges the core SDK into
+  Spring Security's OAuth2 resource server filter chain.
+
+## First files to read
+
+- `README.md` (root) — overview and layout
+- Root `pom.xml` — aggregator listing modules
+- `checkstyle.xml` — shared Checkstyle rules
+- `core/README.md`, `core/pom.xml`, `core/src/main/java/ai/authplane/sdk/core/`
+- `mcp/README.md`, `mcp/src/main/java/ai/authplane/sdk/mcp/`
+- `spring/README.md`, `spring/src/main/java/ai/authplane/sdk/spring/`
+
+## Architecture rules
+
+- All protocol verification, JWKS fetching, caching, and resilience logic
+  lives in `core/`.
+- Adapter modules (`mcp/`, `spring/`) must stay thin: translate framework
+  request contexts into `core` verifier calls and map `core` exceptions to
+  framework-specific responses.
+- Do not duplicate verifier or token-parsing logic across modules.
+- Keep exception and `WWW-Authenticate` header behavior consistent across
+  adapters.
+
+## Minimal usage example
+
+```java
+// core
+var client = AuthplaneClient.builder("https://auth.example.com").build().get();
+var verifier = client.resource("https://api.example.com", List.of("tools/read"));
+var claims = verifier.verify(token).get().claims();
+claims.requireScope("tools/read");
+```
+
+See `mcp/README.md` and `spring/README.md` for framework-specific wiring.
+
+## Validation commands
+
+- Full build + tests: `mvn -B verify`
+- Just the core SDK: `mvn -B -pl core verify`
+- Just the MCP adapter: `mvn -B -pl mcp verify`
+- Just the Spring adapter: `mvn -B -pl spring verify`
+- Formatting/linting follow configured Spotless / Checkstyle / JaCoCo gates.
+
+## Cross-repo references
+
+- Authplane authorization server: `https://github.com/AuthPlane/authserver`
+- Conformance catalog: `https://github.com/AuthPlane/conformance`
+
+## Editing guidance for AI agents
+
+- Respect module boundaries and existing naming.
+- Keep adapters thin and deterministic.
+- Avoid copying verifier/token parsing logic from core into adapters.
+- Keep API changes intentional and test-backed.
+- Prefer minimal diffs with clear rationale.

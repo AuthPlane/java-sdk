@@ -1,0 +1,131 @@
+name: Publish to Maven Central
+
+# Tag-triggered publish. The three artifacts go to Maven Central from this
+# workflow; `release.yml` only pushes the tag and lets this workflow take
+# over.
+#
+# Runs on any `v*.*.*` tag regardless of which branch tip it pointed to
+# (release/v* for current-line releases, hotfix/v* for old-minor patches —
+# both branches are deleted post-tag, but the tag commit itself remains).
+# The tag is the authority — OIDC-style gating is via the `maven-central`
+# GitHub environment's tag policy, which is the strongest binding Maven
+# Central currently supports (Sonatype does not yet offer OIDC-based
+# Trusted Publishing; credentials are still username/token + GPG).
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: publish-maven-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: maven-central
+      url: https://central.sonatype.com/artifact/ai.authplane.sdk/authplane-sdk
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          java-version: "21"
+          distribution: temurin
+          cache: maven
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag ${tag} is not a semantic v<X.Y.Z> version. Refusing to publish."
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify POM version matches tag
+        # The release commit on the release/hotfix branch bumped POMs to
+        # the final X.Y.Z before tagging. Sanity-check that the checked-out
+        # tag really has that version before any deploy.
+        run: |
+          pom_version=$(mvn -B -ntp -q help:evaluate -Dexpression=project.version -DforceStdout --non-recursive)
+          expected="${{ steps.version.outputs.version }}"
+          if [[ "$pom_version" != "$expected" ]]; then
+            echo "::error::POM version ($pom_version) does not match tag version ($expected). Refusing to publish."
+            exit 1
+          fi
+
+      - name: Build, test, sign
+        # Same `-P release` profile the old single-workflow used: enables
+        # source + javadoc jars + GPG signing + Central publishing plugin
+        # wiring. Tests run here as a last-chance gate before deploy.
+        run: mvn -B -ntp -P release verify
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Deploy to Maven Central
+        # Irreversible step — once Central accepts the upload, the version
+        # is permanently claimed. Skip tests (already ran in verify above).
+        run: mvn -B -ntp -P release -DskipTests deploy
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+      # Captures the signed JARs, POMs, .asc signatures, and the
+      # central-publishing bundle from each module's target/. Runs whether
+      # deploy succeeded or failed:
+      #   - Success: compliance evidence of what shipped to Central.
+      #   - Failure: artifacts to retry manually via the Central Portal UI
+      #     after dropping the failed staging deployment (see
+      #     RELEASE_GUIDE.md → Troubleshooting → Maven Central rejects the
+      #     upload mid-deploy).
+      # Retain signed artifacts for 30 days for compliance and manual recovery.
+      - name: Upload signed artifacts (for compliance + manual-recovery)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: maven-artifacts-v${{ steps.version.outputs.version }}
+          path: |
+            core/target/*.jar
+            core/target/*.jar.asc
+            core/target/*.pom
+            core/target/*.pom.asc
+            mcp/target/*.jar
+            mcp/target/*.jar.asc
+            mcp/target/*.pom
+            mcp/target/*.pom.asc
+            spring/target/*.jar
+            spring/target/*.jar.asc
+            spring/target/*.pom
+            spring/target/*.pom.asc
+            **/target/central-publishing/**
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Maven Central publish"
+            echo ""
+            echo "- **Tag**: \`${{ steps.version.outputs.tag }}\`"
+            echo "- **Version**: \`${{ steps.version.outputs.version }}\`"
+            echo "- **Central**: https://central.sonatype.com/search?q=g%3Aai.authplane.sdk+v%3A${{ steps.version.outputs.version }}"
+          } >> "$GITHUB_STEP_SUMMARY"
