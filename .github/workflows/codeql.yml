@@ -54,7 +54,7 @@ jobs:
       # real build. Autobuild can't be trusted across a multi-module reactor,
       # so we drive the compile explicitly below.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           languages: java-kotlin
           build-mode: manual
@@ -69,6 +69,6 @@ jobs:
         run: mvn -B -DskipTests compile
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           category: "/language:java-kotlin"
