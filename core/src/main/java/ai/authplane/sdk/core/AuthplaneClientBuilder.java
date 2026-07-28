@@ -48,7 +48,9 @@ public final class AuthplaneClientBuilder {
     AuthplaneClientBuilder(String issuer) {
         Objects.requireNonNull(issuer, "issuer must not be null");
         if (issuer.isBlank()) throw new IllegalArgumentException("issuer must not be blank");
-        this.issuer = normalizeIssuer(issuer);
+        // RFC 8414 §3.3 — the issuer is an opaque identifier compared with simple string
+        // equality (against metadata and token iss); it is validated but never rewritten.
+        this.issuer = Identifiers.requireValidIdentifier(issuer, "issuer");
     }
 
     /** Sets development mode. When true, SSRF protection is relaxed. */
@@ -266,9 +268,5 @@ public final class AuthplaneClientBuilder {
                                 e);
                     }
                 });
-    }
-
-    private static String normalizeIssuer(String issuer) {
-        return issuer.endsWith("/") ? issuer.substring(0, issuer.length() - 1) : issuer;
     }
 }

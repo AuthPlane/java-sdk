@@ -65,7 +65,9 @@ public class AuthplaneResource {
             List<String> scopes,
             ResourceOptions options) {
         this.client = client;
-        this.resourceUri = resourceUri;
+        // RFC 8707 §2 — the resource identifier is opaque; validated for structure, never
+        // rewritten (it is compared verbatim against aud and advertised verbatim in PRM).
+        this.resourceUri = Identifiers.requireValidIdentifier(resourceUri, "resourceUri");
         this.scopes = List.copyOf(scopes);
         this.allowedAlgorithms = Set.copyOf(options.allowedAlgorithms());
 

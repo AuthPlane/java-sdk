@@ -93,14 +93,14 @@ public class MetadataCache extends DocumentCache {
                     "OAuth server metadata is missing or has empty 'issuer' field");
         }
 
-        String normalizedMetadataIssuer = normalizeIssuer(issuer);
-        String normalizedExpectedIssuer = normalizeIssuer(expectedIssuer);
-        if (!normalizedExpectedIssuer.equals(normalizedMetadataIssuer)) {
+        // RFC 8414 §3.3 — the returned issuer MUST be identical to the configured one;
+        // simple string comparison, no normalisation.
+        if (!expectedIssuer.equals(issuer)) {
             throw new MetadataFetchException(
                     "OAuth server metadata issuer mismatch: expected '"
-                            + normalizedExpectedIssuer
+                            + expectedIssuer
                             + "', got '"
-                            + normalizedMetadataIssuer
+                            + issuer
                             + "'");
         }
 
@@ -149,12 +149,5 @@ public class MetadataCache extends DocumentCache {
                             + value
                             + "'");
         }
-    }
-
-    private static String normalizeIssuer(String issuer) {
-        if (issuer == null) {
-            return null;
-        }
-        return issuer.endsWith("/") ? issuer.substring(0, issuer.length() - 1) : issuer;
     }
 }

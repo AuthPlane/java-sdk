@@ -55,42 +55,40 @@ public final class ProtectedResourceMetadata {
     /**
      * Computes the URL path at which this resource server should serve its PRM document.
      *
-     * <p>The path is derived from the resource URI by inserting {@code
-     * /.well-known/oauth-protected-resource} after the authority:
+     * <p>The path is formed by inserting {@code /.well-known/oauth-protected-resource} between the
+     * authority and the resource URI's path (RFC 9728 §3) — a pure string insertion that preserves
+     * the path exactly, including any trailing slash:
      *
      * <pre>
-     * "https://api.example.com"        → "/.well-known/oauth-protected-resource"
-     * "https://api.example.com/mcp"    → "/.well-known/oauth-protected-resource/mcp"
-     * "https://api.example.com/v2/mcp" → "/.well-known/oauth-protected-resource/v2/mcp"
+     * "https://api.example.com"         → "/.well-known/oauth-protected-resource"
+     * "https://api.example.com/mcp"     → "/.well-known/oauth-protected-resource/mcp"
+     * "https://api.example.com/v2/mcp"  → "/.well-known/oauth-protected-resource/v2/mcp"
+     * "https://api.example.com/mcp/"    → "/.well-known/oauth-protected-resource/mcp/"
      * </pre>
      *
      * @param resourceUri the resource server URI
      * @return the URL path (including leading slash) where the PRM should be served
      */
     public static String wellKnownPath(URI resourceUri) {
-        String path = resourceUri.getPath();
-        if (path == null || path.isEmpty() || path.equals("/")) {
+        String path = resourceUri.getRawPath();
+        if (path == null || path.isEmpty()) {
             return WELL_KNOWN_PREFIX;
         }
-
-        // Strip leading slash — WELL_KNOWN_PREFIX already starts with /
-        String cleanPath = path.startsWith("/") ? path.substring(1) : path;
-        return WELL_KNOWN_PREFIX + "/" + cleanPath;
+        return WELL_KNOWN_PREFIX + path;
     }
 
     /**
      * Computes the full URL of the PRM document for the given resource URI.
      *
+     * <p>Always agrees with {@link #wellKnownPath(URI)}: the URL is the resource's scheme and
+     * authority followed by the well-known path.
+     *
      * @param resourceUri the resource server URI string
      * @return the full PRM document URL
      */
     public static String wellKnownUrl(String resourceUri) {
-        String stripped =
-                resourceUri.endsWith("/")
-                        ? resourceUri.substring(0, resourceUri.length() - 1)
-                        : resourceUri;
-        URI uri = URI.create(stripped);
-        return uri.getScheme() + "://" + uri.getAuthority() + wellKnownPath(uri);
+        URI uri = URI.create(resourceUri);
+        return uri.getScheme() + "://" + uri.getRawAuthority() + wellKnownPath(uri);
     }
 
     // -----------------------------------------------------------------------

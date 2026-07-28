@@ -112,9 +112,38 @@ class ProtectedResourceMetadataTest {
     }
 
     @Test
-    void wellKnownUrl_trailingSlash_stripped() {
+    void wellKnownUrl_trailingSlash_preserved() {
+        // RFC 9728 §3 — pure insertion; the resource's path (here "/") is kept verbatim.
         assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com/"))
-                .isEqualTo("https://api.example.com/.well-known/oauth-protected-resource");
+                .isEqualTo("https://api.example.com/.well-known/oauth-protected-resource/");
+    }
+
+    @Test
+    void wellKnownUrl_pathTrailingSlash_preserved() {
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com/mcp/"))
+                .isEqualTo("https://api.example.com/.well-known/oauth-protected-resource/mcp/");
+    }
+
+    @Test
+    void wellKnownUrl_agreesWithWellKnownPath() {
+        // Class invariant: the URL helper is always scheme + authority + the path helper's
+        // answer, for every input shape.
+        for (String resource :
+                java.util.List.of(
+                        "https://api.example.com",
+                        "https://api.example.com/",
+                        "https://api.example.com/mcp",
+                        "https://api.example.com/mcp/",
+                        "https://api.example.com/v2/mcp",
+                        "https://api.example.com:8443/mcp/")) {
+            URI uri = URI.create(resource);
+            assertThat(ProtectedResourceMetadata.wellKnownUrl(resource))
+                    .isEqualTo(
+                            uri.getScheme()
+                                    + "://"
+                                    + uri.getRawAuthority()
+                                    + ProtectedResourceMetadata.wellKnownPath(uri));
+        }
     }
 
     @Test

@@ -13,9 +13,17 @@ class MetadataUrlBuilderTest {
     }
 
     @Test
-    void issuerWithTrailingSlash() {
+    void issuerWithTrailingSlash_pathIsPreserved() {
+        // RFC 8414 §3 — pure insertion; the issuer's path (here "/") is kept verbatim.
         assertThat(MetadataUrlBuilder.buildMetadataUrl("https://auth.example.com/"))
-                .isEqualTo("https://auth.example.com/.well-known/oauth-authorization-server");
+                .isEqualTo("https://auth.example.com/.well-known/oauth-authorization-server/");
+    }
+
+    @Test
+    void issuerPathWithTrailingSlash_pathIsPreserved() {
+        assertThat(MetadataUrlBuilder.buildMetadataUrl("https://auth.example.com/tenant/"))
+                .isEqualTo(
+                        "https://auth.example.com/.well-known/oauth-authorization-server/tenant/");
     }
 
     @Test

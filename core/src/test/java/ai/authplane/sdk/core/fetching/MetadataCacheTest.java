@@ -42,15 +42,17 @@ class MetadataCacheTest {
     }
 
     @Test
-    void getJwksUri_normalizesTrailingSlashOnIssuer() throws Exception {
-        // Metadata declares issuer with trailing slash; configured value doesn't.
-        // normalizeIssuer should strip the slash before comparison.
+    void getJwksUri_trailingSlashIssuerMismatch_throws() {
+        // RFC 8414 §3.3 — the returned issuer must be identical to the configured one.
+        // A trailing-slash difference is equivalent per RFC 3986 §6.2.3 but not identical.
         MetadataCache cache =
                 cacheWith(
                         Map.of("issuer", ISSUER + "/", "jwks_uri", "https://auth.example.com/jwks"),
                         false);
 
-        assertThat(cache.getJwksUri()).isEqualTo("https://auth.example.com/jwks");
+        assertThatThrownBy(cache::getJwksUri)
+                .isInstanceOf(MetadataFetchException.class)
+                .hasMessageContaining("issuer mismatch");
     }
 
     @Test

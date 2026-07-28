@@ -23,8 +23,17 @@ final class ConformanceTestSupport {
     private ConformanceTestSupport() {}
 
     static void stubMetadata(WireMockServer wireMock, Map<String, Object> metadataDocument) {
+        stubMetadataAt(wireMock, "/.well-known/oauth-authorization-server", metadataDocument);
+    }
+
+    /**
+     * Stubs the metadata document at an explicit path — e.g. the RFC 8414 §3 well-known URL of an
+     * issuer whose identifier ends in a slash.
+     */
+    static void stubMetadataAt(
+            WireMockServer wireMock, String path, Map<String, Object> metadataDocument) {
         wireMock.stubFor(
-                get(urlEqualTo("/.well-known/oauth-authorization-server"))
+                get(urlEqualTo(path))
                         .willReturn(
                                 aResponse()
                                         .withStatus(200)

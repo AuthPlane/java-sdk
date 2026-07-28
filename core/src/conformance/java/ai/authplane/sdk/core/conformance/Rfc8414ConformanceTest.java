@@ -61,6 +61,17 @@ class Rfc8414ConformanceTest extends AbstractPlaceholderConformanceTest {
         assertThatThrownBy(() -> ConformanceTestSupport.buildClient(baseUrl))
                 .isInstanceOf(Exception.class)
                 .hasMessageContaining("issuer");
+
+        // Variant: a trailing-slash difference is equivalent per RFC 3986 §6.2.3 but not
+        // identical — RFC 8414 §3.3 requires identity, so it must be rejected.
+        wireMock.resetAll();
+        ConformanceTestSupport.stubMetadata(
+                wireMock, Map.of("issuer", baseUrl + "/", "jwks_uri", baseUrl + "/jwks"));
+        ConformanceTestSupport.stubJwks(wireMock, "/jwks", rsaKeys);
+
+        assertThatThrownBy(() -> ConformanceTestSupport.buildClient(baseUrl))
+                .isInstanceOf(Exception.class)
+                .hasMessageContaining("issuer");
     }
 
     @Test

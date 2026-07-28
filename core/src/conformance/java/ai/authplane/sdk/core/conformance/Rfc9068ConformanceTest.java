@@ -98,6 +98,28 @@ class Rfc9068ConformanceTest extends AbstractPlaceholderConformanceTest {
                 .cause()
                 .isInstanceOf(InvalidClaimsException.class)
                 .hasMessageContaining("Issuer mismatch");
+
+        // Variant: a token whose iss is identical to a configured trailing-slash issuer must
+        // verify — the issuer is never rewritten, end to end: discovery resolves the
+        // trailing-slash well-known URL (RFC 8414 §3), the advertised issuer matches exactly
+        // (§3.3), and the token's iss matches exactly (RFC 9068 §4).
+        String slashIssuer = baseUrl + "/";
+        wireMock.resetAll();
+        ConformanceTestSupport.stubMetadataAt(
+                wireMock,
+                "/.well-known/oauth-authorization-server/",
+                Map.of("issuer", slashIssuer, "jwks_uri", baseUrl + "/jwks"));
+        ConformanceTestSupport.stubJwks(wireMock, "/jwks", rsaKeys);
+
+        AuthplaneClient slashClient =
+                assertDoesNotThrow(() -> ConformanceTestSupport.buildClient(slashIssuer));
+        AuthplaneResource slashVerifier =
+                ConformanceTestSupport.buildVerifier(
+                        slashClient, TestFixtures.RESOURCE, List.of("read:data"));
+        String acceptedToken = TestFixtures.token().rsaKey(rsaKeys).issuer(slashIssuer).build();
+        VerifiedClaims claims =
+                assertDoesNotThrow(() -> slashVerifier.verify(acceptedToken).get().claims());
+        assertThat(claims.issuer()).isEqualTo(slashIssuer);
     }
 
     @Test
