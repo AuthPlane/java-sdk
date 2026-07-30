@@ -56,11 +56,15 @@ public final class ProtectedResourceMetadata {
      * Computes the URL path at which this resource server should serve its PRM document.
      *
      * <p>The path is derived from the resource URI by inserting {@code
-     * /.well-known/oauth-protected-resource} after the authority:
+     * /.well-known/oauth-protected-resource} after the authority. Trailing slashes on the resource
+     * path are dropped, so identifiers differing only by a trailing slash resolve to the same
+     * metadata document (RFC 9728 §3):
      *
      * <pre>
      * "https://api.example.com"        → "/.well-known/oauth-protected-resource"
+     * "https://api.example.com/"       → "/.well-known/oauth-protected-resource"
      * "https://api.example.com/mcp"    → "/.well-known/oauth-protected-resource/mcp"
+     * "https://api.example.com/mcp/"   → "/.well-known/oauth-protected-resource/mcp"
      * "https://api.example.com/v2/mcp" → "/.well-known/oauth-protected-resource/v2/mcp"
      * </pre>
      *
@@ -69,7 +73,15 @@ public final class ProtectedResourceMetadata {
      */
     public static String wellKnownPath(URI resourceUri) {
         String path = resourceUri.getPath();
-        if (path == null || path.isEmpty() || path.equals("/")) {
+        if (path == null || path.isEmpty()) {
+            return WELL_KNOWN_PREFIX;
+        }
+
+        // Drop trailing slashes — "/mcp/" and "/mcp" must map to the same document
+        while (path.endsWith("/")) {
+            path = path.substring(0, path.length() - 1);
+        }
+        if (path.isEmpty()) {
             return WELL_KNOWN_PREFIX;
         }
 
@@ -81,15 +93,13 @@ public final class ProtectedResourceMetadata {
     /**
      * Computes the full URL of the PRM document for the given resource URI.
      *
+     * <p>Applies the same trailing-slash normalization as {@link #wellKnownPath(URI)}.
+     *
      * @param resourceUri the resource server URI string
      * @return the full PRM document URL
      */
     public static String wellKnownUrl(String resourceUri) {
-        String stripped =
-                resourceUri.endsWith("/")
-                        ? resourceUri.substring(0, resourceUri.length() - 1)
-                        : resourceUri;
-        URI uri = URI.create(stripped);
+        URI uri = URI.create(resourceUri);
         return uri.getScheme() + "://" + uri.getAuthority() + wellKnownPath(uri);
     }
 

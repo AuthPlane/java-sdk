@@ -28,6 +28,20 @@ class ProtectedResourceMetadataTest {
     }
 
     @Test
+    void wellKnownPath_rootResourceWithTrailingSlash() {
+        assertThat(ProtectedResourceMetadata.wellKnownPath(URI.create("https://api.example.com/")))
+                .isEqualTo("/.well-known/oauth-protected-resource");
+    }
+
+    @Test
+    void wellKnownPath_resourceWithTrailingSlash_dropped() {
+        assertThat(
+                        ProtectedResourceMetadata.wellKnownPath(
+                                URI.create("https://api.example.com/mcp/")))
+                .isEqualTo("/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
     void wellKnownPath_resourceWithDeepPath() {
         assertThat(
                         ProtectedResourceMetadata.wellKnownPath(
@@ -115,6 +129,12 @@ class ProtectedResourceMetadataTest {
     void wellKnownUrl_trailingSlash_stripped() {
         assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com/"))
                 .isEqualTo("https://api.example.com/.well-known/oauth-protected-resource");
+    }
+
+    @Test
+    void wellKnownUrl_pathWithTrailingSlash_stripped() {
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com/mcp/"))
+                .isEqualTo("https://api.example.com/.well-known/oauth-protected-resource/mcp");
     }
 
     @Test
