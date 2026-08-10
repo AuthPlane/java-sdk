@@ -1,5 +1,6 @@
 package ai.authplane.sdk.core.fetching;
 
+import java.time.Clock;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReentrantLock;
@@ -28,6 +29,7 @@ public class DocumentCache {
     private final String url;
     private final int configuredRefreshSeconds;
     private final String documentType; // "JWKS" or "metadata" — for log messages
+    private final Clock clock;
     private volatile BiConsumer<Map<String, Object>, Map<String, Object>> onChangeCallback;
 
     private final ReentrantLock fetchLock = new ReentrantLock();
@@ -36,7 +38,10 @@ public class DocumentCache {
     private Map<String, Object> cachedDocument;
     private long cachedAtEpochSeconds; // when the current cache was stored
     private Long serverExpiresAtSeconds; // from HTTP cache headers, or null
-    private CompletableFuture<Void> bgRefreshFuture;
+
+    // Written under fetchLock; volatile so the package-private accessor can read it without
+    // taking fetchLock.
+    private volatile CompletableFuture<Void> bgRefreshFuture;
 
     /**
      * @param fetcher document fetcher (SSRF-safe or direct)
@@ -52,11 +57,43 @@ public class DocumentCache {
             String documentType,
             BiConsumer<Map<String, Object>, Map<String, Object>> onChangeCallback) {
 
+        this(
+                fetcher,
+                url,
+                configuredRefreshSeconds,
+                documentType,
+                onChangeCallback,
+                Clock.systemUTC());
+    }
+
+    /**
+     * Test seam. Same as the public constructor, but with the time source injected so TTL expiry
+     * can be driven by advancing a clock rather than by sleeping against wall time — the difference
+     * between a deterministic assertion and a race with the CI runner.
+     *
+     * <p>The seam is {@link Clock} rather than a {@code LongSupplier} of epoch seconds, even though
+     * this class represents time as {@code long} epoch seconds throughout. {@code Clock} is the
+     * platform idiom, it composes ({@code Clock.fixed}, {@code Clock.offset}), and the conversion
+     * cost is one call in {@code nowEpochSeconds()} — not one per use site. Several other classes
+     * in the SDK still read the wall clock directly and will want the same seam; this is the shape
+     * to copy.
+     *
+     * @param clock the time source
+     */
+    DocumentCache(
+            DocumentFetcher fetcher,
+            String url,
+            int configuredRefreshSeconds,
+            String documentType,
+            BiConsumer<Map<String, Object>, Map<String, Object>> onChangeCallback,
+            Clock clock) {
+
         this.fetcher = fetcher;
         this.url = url;
         this.configuredRefreshSeconds = configuredRefreshSeconds;
         this.documentType = documentType;
         this.onChangeCallback = onChangeCallback;
+        this.clock = clock;
     }
 
     /** Returns the URL this cache fetches from. */
@@ -207,6 +244,15 @@ public class DocumentCache {
         return bgRefreshFuture != null && !bgRefreshFuture.isDone();
     }
 
+    /**
+     * Test seam: the in-flight background refresh, or {@code null} if none has been scheduled. Lets
+     * a test await the refresh it just triggered instead of guessing how long the async fetch will
+     * take.
+     */
+    CompletableFuture<Void> backgroundRefreshFuture() {
+        return bgRefreshFuture;
+    }
+
     private void scheduleBackgroundRefresh() {
         bgRefreshFuture =
                 CompletableFuture.runAsync(
@@ -227,7 +273,7 @@ public class DocumentCache {
                         });
     }
 
-    private static long nowEpochSeconds() {
-        return System.currentTimeMillis() / 1000L;
+    private long nowEpochSeconds() {
+        return clock.instant().getEpochSecond();
     }
 }

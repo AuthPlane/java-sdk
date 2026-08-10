@@ -3,10 +3,16 @@ package ai.authplane.sdk.core.fetching;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 
 import org.junit.jupiter.api.Test;
 
@@ -14,6 +20,9 @@ class DocumentCacheTest {
 
     private static final Map<String, Object> DOC_V1 = Map.of("version", "1");
     private static final Map<String, Object> DOC_V2 = Map.of("version", "2");
+
+    /** Arbitrary fixed start time; only the deltas matter. */
+    private static final long T0 = 1_700_000_000L;
 
     private DocumentCache cache;
 
@@ -47,16 +56,15 @@ class DocumentCacheTest {
                                     throw new CompletionException(
                                             new RuntimeException("Network down"));
                                 });
-        // Very short TTL so it expires quickly
-        cache = cacheWith(fetcher, 1);
+        TestClock clock = new TestClock();
+        cache = cacheWith(fetcher, 100, clock);
         cache.fetch();
 
-        // Wait for TTL to expire
-        Thread.sleep(1500);
+        clock.advanceSeconds(101); // past the TTL
 
-        // Next get() should try to refresh, fail, but return stale
-        Map<String, Object> result = cache.get();
-        assertThat(result).isEqualTo(DOC_V1);
+        // get() refreshes synchronously, the refresh fails, stale is returned
+        assertThat(cache.get()).isEqualTo(DOC_V1);
+        assertThat(calls.get()).isEqualTo(2);
     }
 
     @Test
@@ -80,19 +88,17 @@ class DocumentCacheTest {
                                     return new FetchResult(n == 1 ? DOC_V1 : DOC_V2, null);
                                 });
 
-        cache =
-                new DocumentCache(
-                        fetcher,
-                        "https://example.com/jwks",
-                        1,
-                        "JWKS",
-                        (old, next) -> calls.incrementAndGet());
+        TestClock clock = new TestClock();
+        cache = cacheWith(fetcher, 100, (old, next) -> calls.incrementAndGet(), clock);
         cache.fetch(); // DOC_V1
-        Thread.sleep(1500);
-        cache.get(); // triggers refresh → DOC_V2 → callback called
-        // Wait for async callback
-        Thread.sleep(100);
-        assertThat(calls.get()).isGreaterThanOrEqualTo(1);
+        assertThat(calls.get()).isEqualTo(0); // no change on the first fetch
+
+        clock.advanceSeconds(101); // past the TTL
+
+        // Expired, so get() refreshes synchronously — the callback fires inline, not on a
+        // background thread, so there is nothing to wait for.
+        assertThat(cache.get()).isEqualTo(DOC_V2);
+        assertThat(calls.get()).isEqualTo(1);
     }
 
     @Test
@@ -107,30 +113,50 @@ class DocumentCacheTest {
     @Test
     void get_triggersBackgroundRefreshAt80PercentTtl() throws Exception {
         AtomicInteger fetchCount = new AtomicInteger();
-        cache = cacheWith(countingFetcher(DOC_V1, fetchCount), 1);
-        cache.fetch(); // initial fetch
-        // Wait for 80% of 1s TTL
-        Thread.sleep(900);
-        cache.get(); // should trigger background refresh
-        Thread.sleep(300); // wait for async refresh
-        assertThat(fetchCount.get()).isGreaterThanOrEqualTo(2);
+        TestClock clock = new TestClock();
+        cache = cacheWith(countingFetcher(DOC_V1, fetchCount), 100, clock);
+        cache.fetch();
+        assertThat(fetchCount.get()).isEqualTo(1);
+
+        clock.advanceSeconds(79); // just under the 80% threshold
+        cache.get();
+        assertThat(cache.backgroundRefreshFuture()).isNull();
+        assertThat(fetchCount.get()).isEqualTo(1);
+
+        clock.advanceSeconds(1); // exactly 80% of the 100s TTL
+        cache.get();
+
+        CompletableFuture<Void> refresh = cache.backgroundRefreshFuture();
+        assertThat(refresh).as("a background refresh must have been scheduled").isNotNull();
+        refresh.join(); // await the refresh itself rather than guessing a duration
+
+        assertThat(fetchCount.get()).isEqualTo(2);
     }
 
     @Test
     void get_serverExpiresTtl_usesMinOfConfiguredAndServer() throws Exception {
-        // Return a FetchResult with server-expires that is shorter than configured
-        long serverExpires = System.currentTimeMillis() / 1000 + 1; // 1 second
+        // Server says the document expires 10s from now; the configured TTL is 300s. The
+        // effective TTL must be the server's, so the cache expires at +10 rather than +300.
+        AtomicInteger fetchCount = new AtomicInteger();
+        TestClock clock = new TestClock();
         DocumentFetcher fetcher =
-                url -> CompletableFuture.completedFuture(new FetchResult(DOC_V1, serverExpires));
-        cache = cacheWith(fetcher, 300); // configured 300s, server says 1s
+                url -> {
+                    fetchCount.incrementAndGet();
+                    return CompletableFuture.completedFuture(
+                            new FetchResult(DOC_V1, clock.instant().getEpochSecond() + 10));
+                };
+        cache = cacheWith(fetcher, 300, clock);
         cache.fetch();
 
-        // Wait for server TTL to expire
-        Thread.sleep(1500);
+        clock.advanceSeconds(5); // inside both TTLs
+        cache.get();
+        assertThat(fetchCount.get()).as("still fresh under the server TTL").isEqualTo(1);
 
-        // Should trigger synchronous refresh (returns stale on failure since no network)
-        Map<String, Object> result = cache.get();
-        assertThat(result).isEqualTo(DOC_V1);
+        clock.advanceSeconds(6); // past the server TTL, far short of the configured one
+        assertThat(cache.get()).isEqualTo(DOC_V1);
+        assertThat(fetchCount.get())
+                .as("the server expiry, not the configured TTL, governs")
+                .isEqualTo(2);
     }
 
     @Test
@@ -146,8 +172,44 @@ class DocumentCacheTest {
     // Helpers
     // -----------------------------------------------------------------------
 
+    /** Manually advanced clock, so TTL expiry is driven rather than waited on. */
+    private static final class TestClock extends Clock {
+        private final AtomicLong nowSeconds = new AtomicLong(T0);
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return Instant.ofEpochSecond(nowSeconds.get());
+        }
+
+        void advanceSeconds(long seconds) {
+            nowSeconds.addAndGet(seconds);
+        }
+    }
+
     private static DocumentCache cacheWith(DocumentFetcher fetcher, int ttl) {
         return new DocumentCache(fetcher, "https://example.com/jwks", ttl, "JWKS", null);
+    }
+
+    private static DocumentCache cacheWith(DocumentFetcher fetcher, int ttl, TestClock clock) {
+        return cacheWith(fetcher, ttl, null, clock);
+    }
+
+    private static DocumentCache cacheWith(
+            DocumentFetcher fetcher,
+            int ttl,
+            BiConsumer<Map<String, Object>, Map<String, Object>> onChange,
+            TestClock clock) {
+        return new DocumentCache(fetcher, "https://example.com/jwks", ttl, "JWKS", onChange, clock);
     }
 
     private static DocumentFetcher successFetcher(Map<String, Object> doc) {
