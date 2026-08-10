@@ -20,7 +20,15 @@ Clone the catalog next to the SDK (recommended for local work):
 ```bash
 # From the parent directory of java-sdk/
 git clone git@github.com:AuthPlane/conformance.git conformance
+# Check out the same ref CI pins, so local runs match CI:
+git -C conformance checkout "$(cat java-sdk/.conformance-catalog-ref)"
 ```
+
+CI pins the catalog to the SHA in `java-sdk/.conformance-catalog-ref` — a single
+source of truth read by `ci.yml` and `release.yml`. Bump that file (together with
+the SDK-side coverage for any new cases) to adopt a newer catalog; the weekly
+`conformance-catalog-drift.yml` job fails when the latest catalog drifts ahead of
+the pinned ref. It runs only on a schedule, so it never blocks PR CI.
 
 Expected layout:
 

@@ -46,12 +46,14 @@ The RFC conformance tests load the shared [Authplane Conformance Catalog](https:
 #   ├── java-sdk/      ← this repo
 #   └── conformance/   ← catalog repo
 git clone https://github.com/AuthPlane/conformance.git ../conformance
+# Check out the same ref CI pins, so local runs match CI:
+git -C ../conformance checkout "$(cat .conformance-catalog-ref)"
 
 # Option B — clone it anywhere and point CONFORMANCE_CATALOG_PATH at the file:
 export CONFORMANCE_CATALOG_PATH=/path/to/conformance/oauth-sdk-conformance-catalog.yaml
 ```
 
-See [`core/src/conformance/README.md`](core/src/conformance/README.md) for details. CI clones the catalog automatically.
+CI pins the catalog to the SHA in [`.conformance-catalog-ref`](.conformance-catalog-ref) (a single source of truth read by `ci.yml` and `release.yml`); a weekly `conformance-catalog-drift.yml` job fails when the latest catalog adds cases the SDK does not yet cover (it runs only on a schedule, so it never blocks PRs). Bumping the pinned ref must accompany the matching SDK-side coverage. See [`core/src/conformance/README.md`](core/src/conformance/README.md) for details.
 
 ## Local Verification
 

@@ -210,8 +210,12 @@ class Rfc7662ConformanceTest extends AbstractPlaceholderConformanceTest {
         assertThat(response.raw()).containsEntry("jti", "unique-id-001");
     }
 
+    // No @ConformanceCase: the catalog has no case for the introspection response exposing
+    // cnf.jkt. Its only cnf.jkt case, rfc9449-dpop-bound-token-must-contain-cnf-jkt, covers the
+    // verifier rejecting a DPoP-bound token that lacks the claim (mapped in
+    // Rfc9449ConformanceTest) — a different requirement. Kept as SDK-side coverage of RFC 9449
+    // §6.2 Figure 11, reported under uncatalogued tests.
     @Test
-    @ConformanceCase("rfc9449-introspection-response-must-expose-cnf-jkt")
     void rfc9449_introspection_response_must_expose_cnf_jkt() {
         // RFC 9449 §6.2 Figure 11: cnf.jkt is a top-level member of the introspection response.
         // The SDK introspection result type must expose that thumbprint without forcing callers
