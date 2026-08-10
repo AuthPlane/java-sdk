@@ -10,8 +10,8 @@ import ai.authplane.sdk.core.fetching.ssrf.SsrfException;
 
 /**
  * Decides whether a failure from AS token/introspection/revocation flows should increment the
- * circuit breaker (Python {@code AuthplaneClient._handle_failure} semantics, extended for OAuth
- * business errors vs infra).
+ * circuit breaker, distinguishing OAuth business errors (which do not trip it) from infrastructure
+ * failures (which do).
  */
 public final class CircuitPolicy {
 

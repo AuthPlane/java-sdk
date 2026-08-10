@@ -9,8 +9,7 @@ import java.io.Serial;
  * depends on the exact semantics of this exception type: "the token is DPoP-bound ({@code cnf.jkt}
  * present) but the call site provided no {@code VerificationRequestContext} to bind a proof
  * against." The MCP adapter swallows this specific exception in its bearer-only pre-validation pass
- * and defers proof binding to its second hook (the context extractor) — that is the Java equivalent
- * of the TS SDK's FastMCP DPoP workaround.
+ * and defers proof binding to its second hook (the context extractor).
  *
  * <p>If you refactor {@code AuthplaneResource.validateDpop} so that this exception is thrown for a
  * <em>different</em> reason (e.g. proof present but malformed), update the swallow logic in {@code

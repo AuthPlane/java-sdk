@@ -190,6 +190,48 @@ class AuthplaneClientTest {
                         });
     }
 
+    @Test
+    void build_issuerWithTrailingSlash_reachesMetadataCacheAndValidatorVerbatim() throws Exception {
+        // The builder stores the configured issuer verbatim and passes it to MetadataCache (and,
+        // via the client, to each resource's JwtValidator) as the expected issuer. Metadata and
+        // token validation compare byte-for-byte (RFC 8414 §3.3), so a trailing-slash issuer
+        // verifies only against a metadata document — and a token — whose `iss` carries the same
+        // trailing slash. If the builder silently normalized the issuer (stripping the slash), the
+        // metadata comparison would fail and build() would throw; a green build therefore proves
+        // the configured value reached MetadataCache unmodified.
+        String issuerWithSlash = baseUrl + "/";
+        wireMock.resetAll();
+        wireMock.stubFor(
+                get(urlEqualTo("/.well-known/oauth-authorization-server"))
+                        .willReturn(
+                                aResponse()
+                                        .withStatus(200)
+                                        .withHeader("Content-Type", "application/json")
+                                        .withBody(
+                                                TestFixtures.serializeMap(
+                                                        Map.of(
+                                                                "issuer",
+                                                                issuerWithSlash,
+                                                                "jwks_uri",
+                                                                baseUrl + "/jwks")))));
+        stubJwks();
+
+        AuthplaneClient client =
+                AuthplaneClient.builder(issuerWithSlash).devMode(true).build().get();
+
+        // Builder stored the issuer byte-for-byte.
+        assertThat(client.issuer()).isEqualTo(issuerWithSlash);
+
+        // The JwtValidator built for a resource inherits the same verbatim issuer: a token whose
+        // `iss` carries the identical trailing slash verifies.
+        AuthplaneResource verifier = client.resource(TestFixtures.RESOURCE, TestFixtures.SCOPES);
+        String token = TestFixtures.token().rsaKey(rsaKeys).issuer(issuerWithSlash).build();
+        VerifiedClaims claims = verifier.verify(token).get().claims();
+        assertThat(claims.issuer()).isEqualTo(issuerWithSlash);
+
+        client.close();
+    }
+
     // -----------------------------------------------------------------------
     // resource() factory creates working resources
     // -----------------------------------------------------------------------

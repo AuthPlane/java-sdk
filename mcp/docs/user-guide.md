@@ -384,7 +384,7 @@ The MCP Java SDK splits transport-level auth into two hooks with different capab
 
 ### DPoP-bound tokens (`cnf.jkt` present)
 
-`AuthplaneMcpAdapter` handles this asymmetry internally so DPoP-bound tokens work end-to-end (the TypeScript SDK's FastMCP integration has the same `authenticate`-called-twice hook split and applies the equivalent workaround):
+`AuthplaneMcpAdapter` handles this asymmetry internally so DPoP-bound tokens work end-to-end (the MCP Java SDK splits header validation and request extraction into two hooks, so the adapter defers the DPoP proof check to the hook that has the request):
 
 - **`validateHeaders`** runs `resource.verify(token)` in bearer-only mode. For a DPoP-bound token this throws `DPoPProofMissingException` by design — the adapter **swallows that specific exception** and lets the request flow through. All other failures (expired, bad signature, revoked, DPoP unsupported, scope insufficient) still surface as 401/403.
 - **`extract`** runs `resource.verify(token, context)` with the full request context. This is the authoritative DPoP validation: proof signature, `htm`/`htu`/`ath` claims, replay store check, binding to `cnf.jkt`. Failures here bubble as the typed `AuthplaneException` (visible as 500 with diagnostic body — see "DPoP failure surface" below).
@@ -404,7 +404,7 @@ For the SSE GET path the MCP Java SDK calls only `validateHeaders`, never `extra
 
 `validateHeaders` and `extract` each call `resource.verify(...)` for bearer-only tokens, so the verifier runs twice per request. When RFC 7662 introspection-based revocation checking is enabled, this triggers **two introspection calls per request** to the authorization server. DPoP-bound tokens incur only one full verify (the validateHeaders pass throws `DPoPProofMissingException` before reaching introspection).
 
-A per-request memo (analogous to the TypeScript SDK's `AsyncLocalStorage`-keyed cache used in its FastMCP integration) would collapse the bearer-only path back to one introspection per request without changing the public contract. It would need either an upstream MCP SDK change to give `validateHeaders` access to the request, or a separately registered servlet `Filter` that sets a request attribute the adapter can read. Tracked as a noted follow-up; not in this version.
+A per-request memo (a request-scoped cache of the verify result, keyed by the in-flight request) would collapse the bearer-only path back to one introspection per request without changing the public contract. It would need either an upstream MCP SDK change to give `validateHeaders` access to the request, or a separately registered servlet `Filter` that sets a request attribute the adapter can read. Tracked as a noted follow-up; not in this version.
 
 ### DPoP failure surface
 

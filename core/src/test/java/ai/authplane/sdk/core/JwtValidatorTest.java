@@ -260,6 +260,25 @@ class JwtValidatorTest {
     }
 
     @Test
+    void verify_issuerWithConfiguredTrailingSlash_verifies() throws Exception {
+        // Identifiers are compared verbatim (RFC 8414 §3.3): the configured issuer is compared
+        // byte-for-byte. When the validator is configured with a trailing-slash issuer and the
+        // token's `iss` carries the same trailing slash, verification succeeds — the SDK does not
+        // silently reconcile slashes.
+        String issuerWithSlash = TestFixtures.ISSUER + "/";
+        JwtValidator validator =
+                new JwtValidator(
+                        issuerWithSlash,
+                        TestFixtures.RESOURCE,
+                        Set.of("RS256", "ES256"),
+                        30,
+                        rsaKeyLookup());
+        String token = TestFixtures.token().rsaKey(rsaKeys).issuer(issuerWithSlash).build();
+        VerifiedClaims claims = validator.verify(token);
+        assertThat(claims.issuer()).isEqualTo(issuerWithSlash);
+    }
+
+    @Test
     void verify_wrongAudience_throwsInvalidClaims() {
         JwtValidator validator = validatorWith(rsaKeyLookup());
         String token =

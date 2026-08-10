@@ -61,6 +61,18 @@ class Rfc8414ConformanceTest extends AbstractPlaceholderConformanceTest {
         assertThatThrownBy(() -> ConformanceTestSupport.buildClient(baseUrl))
                 .isInstanceOf(Exception.class)
                 .hasMessageContaining("issuer");
+
+        // Catalog variant: the §3.3 comparison is exact, so a metadata issuer differing from the
+        // configured issuer only by a terminating slash is rejected too. This is the case a
+        // normalizing comparison would silently accept.
+        wireMock.resetAll();
+        ConformanceTestSupport.stubMetadata(
+                wireMock, Map.of("issuer", baseUrl + "/", "jwks_uri", baseUrl + "/jwks"));
+        ConformanceTestSupport.stubJwks(wireMock, "/jwks", rsaKeys);
+
+        assertThatThrownBy(() -> ConformanceTestSupport.buildClient(baseUrl))
+                .isInstanceOf(Exception.class)
+                .hasMessageContaining("issuer");
     }
 
     @Test

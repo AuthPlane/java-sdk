@@ -98,6 +98,30 @@ class Rfc9068ConformanceTest extends AbstractPlaceholderConformanceTest {
                 .cause()
                 .isInstanceOf(InvalidClaimsException.class)
                 .hasMessageContaining("Issuer mismatch");
+
+        // Catalog variant: an authorization server whose identifier genuinely ends in "/" mints
+        // tokens whose iss carries that slash. Matching is exact in both directions, so the token
+        // verifies — the pair is identical, not normalized into agreement. This is the leg a
+        // trailing-slash-stripping comparison broke: it compared the token's "…/" against a
+        // stripped configured issuer and rejected every token the AS issued.
+        String slashIssuer = baseUrl + "/";
+        wireMock.resetAll();
+        ConformanceTestSupport.stubMetadata(
+                wireMock, Map.of("issuer", slashIssuer, "jwks_uri", baseUrl + "/jwks"));
+        ConformanceTestSupport.stubJwks(wireMock, "/jwks", rsaKeys);
+
+        AuthplaneResource slashVerifier =
+                assertDoesNotThrow(
+                        () ->
+                                ConformanceTestSupport.buildVerifier(
+                                        ConformanceTestSupport.buildClient(slashIssuer),
+                                        TestFixtures.RESOURCE,
+                                        List.of("read:data")));
+        String slashToken = TestFixtures.token().rsaKey(rsaKeys).issuer(slashIssuer).build();
+
+        VerifiedClaims slashClaims =
+                assertDoesNotThrow(() -> slashVerifier.verify(slashToken).get().claims());
+        assertThat(slashClaims.issuer()).isEqualTo(slashIssuer);
     }
 
     @Test

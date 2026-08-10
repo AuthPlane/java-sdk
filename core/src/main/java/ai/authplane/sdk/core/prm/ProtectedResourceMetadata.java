@@ -61,36 +61,83 @@ public final class ProtectedResourceMetadata {
      * <pre>
      * "https://api.example.com"        → "/.well-known/oauth-protected-resource"
      * "https://api.example.com/mcp"    → "/.well-known/oauth-protected-resource/mcp"
+     * "https://api.example.com/mcp/"   → "/.well-known/oauth-protected-resource/mcp"
+     * "https://api.example.com/mcp//"  → "/.well-known/oauth-protected-resource/mcp"
      * "https://api.example.com/v2/mcp" → "/.well-known/oauth-protected-resource/v2/mcp"
+     * "https://api.example.com/a%2Fb"  → "/.well-known/oauth-protected-resource/a%2Fb"
      * </pre>
      *
-     * @param resourceUri the resource server URI
+     * <p>Per RFC 9728 §3.1 every terminating slash of the resource path is stripped when deriving
+     * the well-known path; it does not affect the resource identifier itself. The derivation reads
+     * the raw (percent-encoded) path, so an encoded octet such as {@code %2F} is carried through
+     * verbatim rather than decoded into a path separator — decoding it would name a different path
+     * than the resource identifier does.
+     *
+     * @param resourceUri the resource server URI; must be hierarchical and carry an authority
      * @return the URL path (including leading slash) where the PRM should be served
+     * @throws IllegalArgumentException if {@code resourceUri} is opaque or has no authority
      */
     public static String wellKnownPath(URI resourceUri) {
-        String path = resourceUri.getPath();
-        if (path == null || path.isEmpty() || path.equals("/")) {
+        requireDerivable(resourceUri);
+
+        // Read the raw path: URI.getPath() percent-decodes, which would turn a resource
+        // identifier of ".../a%2Fb" into the well-known path ".../a/b" — a different path than
+        // the identifier names, and the silent rewrite this derivation exists to avoid.
+        String path = resourceUri.getRawPath();
+        if (path == null || path.isEmpty()) {
+            return WELL_KNOWN_PREFIX;
+        }
+
+        // Strip every terminating slash before deriving the well-known path (RFC 9728 §3.1):
+        // the resource identity is preserved elsewhere, but the derived .well-known path must
+        // not carry a trailing slash ("/mcp/" and "/mcp//" both → ".../mcp"). Stripping only one
+        // would make this helper and wellKnownUrl disagree on a doubled slash.
+        String derivedPath = path.replaceAll("/+$", "");
+        if (derivedPath.isEmpty()) {
             return WELL_KNOWN_PREFIX;
         }
 
         // Strip leading slash — WELL_KNOWN_PREFIX already starts with /
-        String cleanPath = path.startsWith("/") ? path.substring(1) : path;
+        String cleanPath = derivedPath.startsWith("/") ? derivedPath.substring(1) : derivedPath;
         return WELL_KNOWN_PREFIX + "/" + cleanPath;
     }
 
     /**
      * Computes the full URL of the PRM document for the given resource URI.
      *
-     * @param resourceUri the resource server URI string
+     * <p>The path component is derived by {@link #wellKnownPath(URI)}, so both helpers agree by
+     * construction: the slash stripping happens in exactly one place.
+     *
+     * @param resourceUri the resource server URI string; must be hierarchical and carry an
+     *     authority
      * @return the full PRM document URL
+     * @throws IllegalArgumentException if {@code resourceUri} is opaque or has no authority
      */
     public static String wellKnownUrl(String resourceUri) {
-        String stripped =
-                resourceUri.endsWith("/")
-                        ? resourceUri.substring(0, resourceUri.length() - 1)
-                        : resourceUri;
-        URI uri = URI.create(stripped);
+        URI uri = URI.create(resourceUri);
+        requireDerivable(uri);
         return uri.getScheme() + "://" + uri.getAuthority() + wellKnownPath(uri);
+    }
+
+    /**
+     * Guards the PRM derivation helpers against identifiers they cannot derive from.
+     *
+     * <p>RFC 8707 §2 permits a resource indicator that is any absolute URI, and this class stores
+     * whatever it is given verbatim — {@code urn:example:api} is a valid resource identifier. But
+     * an opaque URI has no authority and no hierarchical path, so there is no PRM URL to publish
+     * for it: the derivation would otherwise emit {@code urn://null/.well-known/...} and hand that
+     * to the {@code resource_metadata} parameter of the 401 challenge.
+     */
+    private static void requireDerivable(URI resourceUri) {
+        if (resourceUri.isOpaque() || resourceUri.getAuthority() == null) {
+            throw new IllegalArgumentException(
+                    "Cannot derive a Protected Resource Metadata URL from \""
+                            + resourceUri
+                            + "\": PRM derivation requires a hierarchical resource identifier with"
+                            + " an authority (e.g. https://api.example.com/mcp). The resource"
+                            + " identifier itself may be any absolute URI permitted by RFC 8707 §2"
+                            + " and is stored verbatim; only the derivation is restricted.");
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -48,7 +48,9 @@ public final class AuthplaneClientBuilder {
     AuthplaneClientBuilder(String issuer) {
         Objects.requireNonNull(issuer, "issuer must not be null");
         if (issuer.isBlank()) throw new IllegalArgumentException("issuer must not be blank");
-        this.issuer = normalizeIssuer(issuer);
+        // Store the issuer verbatim (identity is preserved). Any trailing slash is stripped only
+        // where a URL is *derived* (RFC 8414/9728 §3.1), never on the stored/compared identifier.
+        this.issuer = issuer;
     }
 
     /** Sets development mode. When true, SSRF protection is relaxed. */
@@ -266,9 +268,5 @@ public final class AuthplaneClientBuilder {
                                 e);
                     }
                 });
-    }
-
-    private static String normalizeIssuer(String issuer) {
-        return issuer.endsWith("/") ? issuer.substring(0, issuer.length() - 1) : issuer;
     }
 }

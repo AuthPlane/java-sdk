@@ -2,6 +2,7 @@ package ai.authplane.sdk.core.fetching;
 
 import java.net.URI;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.BiConsumer;
 import java.util.logging.Logger;
 
@@ -11,9 +12,8 @@ import ai.authplane.sdk.core.errors.MetadataFetchException;
  * Cache for OAuth Authorization Server Metadata (RFC 8414).
  *
  * <p>Extracts and validates the {@code jwks_uri} field. Validates issuer and endpoint URLs
- * internally when metadata is fetched, matching the Python/Go pattern. Triggers the change callback
- * when the document changes, allowing the caller to detect jwks_uri rotation and restart the
- * JwksCache.
+ * internally when metadata is fetched. Triggers the change callback when the document changes,
+ * allowing the caller to detect jwks_uri rotation and restart the JwksCache.
  */
 public class MetadataCache extends DocumentCache {
 
@@ -45,7 +45,11 @@ public class MetadataCache extends DocumentCache {
             boolean allowHttp,
             BiConsumer<Map<String, Object>, Map<String, Object>> onChangeCallback) {
         super(fetcher, metadataUrl, refreshSeconds, "metadata", onChangeCallback);
-        this.expectedIssuer = expectedIssuer;
+        // Required: the RFC 8414 §3.3 comparison in getJwksUri() dereferences this. Without the
+        // check a null surfaces as a bare NPE from the first metadata read rather than as a
+        // contract violation at construction.
+        this.expectedIssuer =
+                Objects.requireNonNull(expectedIssuer, "expectedIssuer must not be null");
         this.allowHttp = allowHttp;
     }
 
@@ -93,14 +97,14 @@ public class MetadataCache extends DocumentCache {
                     "OAuth server metadata is missing or has empty 'issuer' field");
         }
 
-        String normalizedMetadataIssuer = normalizeIssuer(issuer);
-        String normalizedExpectedIssuer = normalizeIssuer(expectedIssuer);
-        if (!normalizedExpectedIssuer.equals(normalizedMetadataIssuer)) {
+        // RFC 8414 §3.3: the issuer is compared byte-for-byte against the configured value.
+        // No trailing-slash reconciliation — a difference in the terminating slash is a mismatch.
+        if (!expectedIssuer.equals(issuer)) {
             throw new MetadataFetchException(
                     "OAuth server metadata issuer mismatch: expected '"
-                            + normalizedExpectedIssuer
+                            + expectedIssuer
                             + "', got '"
-                            + normalizedMetadataIssuer
+                            + issuer
                             + "'");
         }
 
@@ -149,12 +153,5 @@ public class MetadataCache extends DocumentCache {
                             + value
                             + "'");
         }
-    }
-
-    private static String normalizeIssuer(String issuer) {
-        if (issuer == null) {
-            return null;
-        }
-        return issuer.endsWith("/") ? issuer.substring(0, issuer.length() - 1) : issuer;
     }
 }

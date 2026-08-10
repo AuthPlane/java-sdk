@@ -42,13 +42,42 @@ class MetadataCacheTest {
     }
 
     @Test
-    void getJwksUri_normalizesTrailingSlashOnIssuer() throws Exception {
-        // Metadata declares issuer with trailing slash; configured value doesn't.
-        // normalizeIssuer should strip the slash before comparison.
+    void getJwksUri_trailingSlashIssuerMismatch_rejected() {
+        // RFC 8414 §3.3: issuer is compared byte-for-byte. Metadata declares the issuer with a
+        // trailing slash; the configured value does not — the SDK must NOT reconcile them.
         MetadataCache cache =
                 cacheWith(
                         Map.of("issuer", ISSUER + "/", "jwks_uri", "https://auth.example.com/jwks"),
                         false);
+
+        assertThatThrownBy(cache::getJwksUri)
+                .isInstanceOf(MetadataFetchException.class)
+                .hasMessageContaining("issuer mismatch");
+    }
+
+    @Test
+    void getJwksUri_issuerWithConfiguredTrailingSlash_verifies() throws Exception {
+        // Identifiers are compared verbatim (RFC 8414 §3.3): when the configured issuer itself
+        // carries a trailing slash and the metadata's iss matches it byte-for-byte, verification
+        // succeeds.
+        DocumentFetcher fetcher =
+                url ->
+                        CompletableFuture.completedFuture(
+                                new FetchResult(
+                                        Map.of(
+                                                "issuer",
+                                                ISSUER + "/",
+                                                "jwks_uri",
+                                                "https://auth.example.com/jwks"),
+                                        null));
+        MetadataCache cache =
+                new MetadataCache(
+                        fetcher,
+                        ISSUER + "/.well-known/oauth-authorization-server",
+                        300,
+                        ISSUER + "/",
+                        false,
+                        null);
 
         assertThat(cache.getJwksUri()).isEqualTo("https://auth.example.com/jwks");
     }
