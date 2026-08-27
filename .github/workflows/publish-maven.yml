@@ -75,6 +75,25 @@ jobs:
             exit 1
           fi
 
+      # Uses the runner's built-in git instead of actions/checkout: equivalent
+      # trust for a public repo (AuthPlane/conformance), no third-party action
+      # surface to SHA-pin. Keeps the catalog outside the workspace. Same step
+      # as ci.yml and release.yml — the verify below re-runs the full test
+      # suite as a last-chance gate, and the conformance alignment tests read
+      # the catalog through CONFORMANCE_CATALOG_PATH.
+      - name: Check out shared conformance catalog (outside workspace)
+        run: |
+          CONFORMANCE_CATALOG_REF="$(cat "$GITHUB_WORKSPACE/.conformance-catalog-ref")"
+          # Guard the pin: a non-SHA value would silently un-pin CI to whatever
+          # ref resolves at fetch time.
+          grep -Eq '^[0-9a-f]{40}$' <<<"$CONFORMANCE_CATALOG_REF" \
+            || { echo "::error::.conformance-catalog-ref must be a 40-hex commit SHA"; exit 1; }
+          git init -q "${{ runner.temp }}/conformance"
+          git -C "${{ runner.temp }}/conformance" \
+            fetch --depth=1 https://github.com/AuthPlane/conformance.git "$CONFORMANCE_CATALOG_REF" \
+            || { echo "::error::Pinned conformance catalog ref $CONFORMANCE_CATALOG_REF is unreachable"; exit 1; }
+          git -C "${{ runner.temp }}/conformance" checkout -q FETCH_HEAD
+
       - name: Build, test, sign
         # Same `-P release` profile the old single-workflow used: enables
         # source + javadoc jars + GPG signing + Central publishing plugin
@@ -82,6 +101,7 @@ jobs:
         run: mvn -B -ntp -P release verify
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          CONFORMANCE_CATALOG_PATH: ${{ runner.temp }}/conformance/oauth-sdk-conformance-catalog.yaml
 
       - name: Deploy to Maven Central
         # Irreversible step — once Central accepts the upload, the version
