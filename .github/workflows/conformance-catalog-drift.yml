@@ -1,0 +1,121 @@
+name: Conformance catalog drift
+
+# Early-warning for conformance-catalog drift.
+#
+# PR/release CI pins the catalog to the SHA in `.conformance-catalog-ref`, so a
+# new catalog case can never break CI on its own. The trade-off is that new
+# cases go unnoticed until someone bumps the ref. This job closes that gap: on a
+# weekly schedule it clones the catalog's *default* branch (latest, unpinned),
+# points the harness at it, and runs the alignment assertion
+# (ConformanceCatalogTest#catalogCasesAndConformanceMappingsAgree), which fails
+# when a catalog case id has no matching @ConformanceCase mapping in the suite
+# (or vice versa). PR and release CI run that same assertion against the *pinned*
+# catalog; the only difference here is which catalog it points at. This job has no
+# `pull_request` trigger, so failing the scheduled run cannot block PRs; it deliberately FAILS
+# on drift so the run turns red and the `::warning::` plus job-summary line are
+# not buried in an otherwise-green run — prompting a coordinated ref bump plus
+# SDK-side coverage.
+
+on:
+  schedule:
+    # Mondays 07:00 UTC
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+# Least-privilege default; this workflow only reads the repo.
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Clone the catalog's default branch (latest) — deliberately unpinned,
+      # unlike ci.yml/release.yml which pin to `.conformance-catalog-ref`. This
+      # is what lets the job detect cases added since the pinned ref.
+      - name: Check out latest shared conformance catalog (outside workspace)
+        run: |
+          git clone --depth=1 https://github.com/AuthPlane/conformance.git \
+            "${{ runner.temp }}/conformance" \
+            || { echo "::error::Could not clone the conformance catalog default branch"; exit 1; }
+
+      - name: Setup Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # Runs the alignment assertion against the latest catalog. That assertion
+      # (ConformanceCatalogTest#catalogCasesAndConformanceMappingsAgree) fails
+      # when a catalog case id has no matching @ConformanceCase mapping in the
+      # suite — i.e. a case added since the pinned ref that the SDK does not yet
+      # cover. PR/release CI runs the same assertion against the catalog pinned
+      # in .conformance-catalog-ref; pointing CONFORMANCE_CATALOG_PATH at the
+      # unpinned tip is this job's entire contribution. The step is deliberately
+      # allowed to fail the job (no `continue-on-error`) so scheduled drift turns
+      # the run red instead of hiding in a green run; the workflow has no
+      # `pull_request` trigger, so this never blocks PR CI.
+      - name: Run catalog-alignment check against latest catalog
+        id: align
+        env:
+          CONFORMANCE_CATALOG_PATH: ${{ runner.temp }}/conformance/oauth-sdk-conformance-catalog.yaml
+        run: mvn -B -ntp -pl core test -Dtest=ConformanceCatalogTest
+
+      # Runs even when the alignment step fails the job, so the `::warning::`
+      # and job summary are always written on drift. A `failure` outcome alone
+      # does not mean drift — the step also fails on a compile error, a Maven
+      # resolution failure, or a failure of the other test in the class. Real
+      # drift is identified by the `Conformance-catalog drift:` marker the
+      # assertion writes into the surefire report; anything else that failed the
+      # step is reported as an infrastructure problem, as are skipped/cancelled
+      # outcomes (the alignment step never ran because an earlier step failed).
+      - name: Report drift
+        if: always()
+        run: |
+          pinned="$(cat "$GITHUB_WORKSPACE/.conformance-catalog-ref")"
+          grep -Eq '^[0-9a-f]{40}$' <<<"$pinned" \
+            || { echo "::error::.conformance-catalog-ref must be a 40-hex commit SHA"; exit 1; }
+          case "${{ steps.align.outcome }}" in
+            success)
+              echo "No conformance-catalog drift detected against the latest catalog." >> "$GITHUB_STEP_SUMMARY"
+              echo "Pinned ref: \`$pinned\`" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            failure)
+              if grep -rqF 'Conformance-catalog drift:' core/target/surefire-reports 2>/dev/null; then
+                echo "::warning::Conformance-catalog drift: the catalog-alignment check fails against the latest catalog. New or changed cases exist since the pinned ref ($pinned). Review github.com/AuthPlane/conformance, add SDK-side coverage, then bump .conformance-catalog-ref."
+                {
+                  echo "### ⚠️ Conformance-catalog drift detected"
+                  echo ""
+                  echo "The catalog-alignment check fails against the **latest** catalog default branch."
+                  echo "New or changed cases exist since the pinned ref \`$pinned\`."
+                  echo ""
+                  echo "**Next steps:** review [AuthPlane/conformance](https://github.com/AuthPlane/conformance), add SDK-side coverage for any new cases, then bump \`.conformance-catalog-ref\` in the same change."
+                } >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "::warning::The catalog-alignment step failed without the drift marker (no 'Conformance-catalog drift:' in the surefire report). This is a build or harness problem — a compile error, a Maven resolution failure, or the other test in the class — not catalog drift."
+                {
+                  echo "### ⚠️ Conformance drift check failed for another reason"
+                  echo ""
+                  echo "The alignment step failed, but the surefire report carries no \`Conformance-catalog drift:\` marker."
+                  echo "That points at a build or harness problem (compile error, dependency resolution, or the other test in the class), **not** catalog drift."
+                  echo ""
+                  echo "Read the step log above before touching \`.conformance-catalog-ref\`."
+                } >> "$GITHUB_STEP_SUMMARY"
+              fi
+              ;;
+            *)
+              echo "::warning::Conformance drift check did not run: the alignment step was '${{ steps.align.outcome }}' (the catalog clone or Setup Java likely failed). This is an infrastructure problem, not catalog drift."
+              {
+                echo "### ⚠️ Conformance drift check could not run"
+                echo ""
+                echo "The alignment step was \`${{ steps.align.outcome }}\`, so drift was not evaluated."
+                echo "This is an infrastructure issue (e.g. the catalog clone or Setup Java failed), **not** catalog drift."
+                echo ""
+                echo "Re-run the workflow; if it keeps failing, investigate the failing setup step above."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac

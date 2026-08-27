@@ -28,10 +28,24 @@ jobs:
       # surface to SHA-pin. Keeps the catalog outside the workspace so
       # release.yml's `git add -A` cannot stage it as an embedded gitlink.
       - name: Check out shared conformance catalog (outside workspace)
+        # Conformance catalog pinned by SHA (was: clone of the latest default
+        # branch). The single source of truth for the ref is the tracked
+        # `.conformance-catalog-ref` file at the repo root — bump it when
+        # adopting new catalog cases, together with the SDK-side conformance
+        # coverage, so a catalog change can never break CI on its own. The
+        # Checkout step above must precede this read. Source:
+        # github.com/AuthPlane/conformance.
         run: |
-          git -c advice.detachedHead=false clone --depth=1 \
-            https://github.com/AuthPlane/conformance.git \
-            "${{ runner.temp }}/conformance"
+          CONFORMANCE_CATALOG_REF="$(cat "$GITHUB_WORKSPACE/.conformance-catalog-ref")"
+          # Guard the pin: a non-SHA value would silently un-pin CI to whatever
+          # ref resolves at fetch time.
+          grep -Eq '^[0-9a-f]{40}$' <<<"$CONFORMANCE_CATALOG_REF" \
+            || { echo "::error::.conformance-catalog-ref must be a 40-hex commit SHA"; exit 1; }
+          git init -q "${{ runner.temp }}/conformance"
+          git -C "${{ runner.temp }}/conformance" \
+            fetch --depth=1 https://github.com/AuthPlane/conformance.git "$CONFORMANCE_CATALOG_REF" \
+            || { echo "::error::Pinned conformance catalog ref $CONFORMANCE_CATALOG_REF is unreachable"; exit 1; }
+          git -C "${{ runner.temp }}/conformance" checkout -q FETCH_HEAD
 
       - name: Setup Java
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
