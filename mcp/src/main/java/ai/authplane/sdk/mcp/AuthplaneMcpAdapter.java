@@ -52,9 +52,8 @@ import io.modelcontextprotocol.server.transport.ServerTransportSecurityValidator
  * <p><b>API Note — Double introspection on authenticated paths:</b> {@code validateHeaders} and
  * {@code extract} each invoke {@code resource.verify(...)}, so when RFC 7662 introspection-based
  * revocation checking is enabled a bearer-only request triggers two introspection calls to the
- * authorization server. A per-request memo (analogous to the TypeScript SDK's {@code
- * AsyncLocalStorage} cache) would collapse it to one without changing the public contract — left as
- * a noted follow-up.
+ * authorization server. A per-request memo (a request-scoped cache of the verify result) would
+ * collapse it to one without changing the public contract — left as a noted follow-up.
  *
  * @see AuthplaneMcpSetup
  */
@@ -122,12 +121,10 @@ public final class AuthplaneMcpAdapter
      * through POST and receive full DPoP + revocation validation via {@code extract}. See
      * user-guide §13 for the full rationale.
      *
-     * <p>The TypeScript SDK applies the equivalent workaround in its FastMCP integration ({@code
-     * authenticate} is called twice per request and the verify result is cached across calls via
-     * {@code AsyncLocalStorage}). The Java MCP SDK exposes two hooks that cannot share state
-     * because {@code validateHeaders} receives only headers (no request), so the equivalent
-     * invariant ("DPoP proof validated exactly once per request") is reached by deferring proof
-     * binding to {@code extract} rather than caching across calls.
+     * <p>The Java MCP SDK exposes two hooks that cannot share state because {@code validateHeaders}
+     * receives only headers (no request), so the invariant ("DPoP proof validated exactly once per
+     * request") is reached by deferring proof binding to {@code extract} rather than caching the
+     * verify result across the two calls.
      *
      * @param headers request headers (multi-valued, case-insensitive lookup)
      * @throws ServerTransportSecurityException HTTP 401 if the Authorization header is missing,

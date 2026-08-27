@@ -62,9 +62,8 @@ import io.modelcontextprotocol.server.transport.ServerTransportSecurityValidator
  * <p><b>API Note — Double introspection on authenticated paths:</b> {@code validateHeaders} and
  * {@code extract} each invoke {@code resource.verify(...)}, so when RFC 7662 introspection-based
  * revocation checking is enabled a bearer-only request triggers two introspection calls to the
- * authorization server. A per-request memo (analogous to the TypeScript SDK's {@code
- * AsyncLocalStorage} cache) would collapse it to one without changing the public contract — left as
- * a noted follow-up.
+ * authorization server. A per-request memo (a request-scoped cache of the verify result) would
+ * collapse it to one without changing the public contract — left as a noted follow-up.
  *
  * @see AuthplaneMcpServerConfig
  */

@@ -148,5 +148,13 @@ class Rfc9728ConformanceTest extends AbstractPlaceholderConformanceTest {
                         ProtectedResourceMetadata.wellKnownPath(
                                 URI.create("https://api.example.com/v2/mcp")))
                 .isEqualTo("/.well-known/oauth-protected-resource/v2/mcp");
+
+        // Catalog variant: a resource identifier published with a terminating slash serves its
+        // metadata at the slash-less well-known path, so identifiers differing only by that slash
+        // resolve to the same document (RFC 9728 §3.1).
+        assertThat(
+                        ProtectedResourceMetadata.wellKnownPath(
+                                URI.create("https://api.example.com/mcp/")))
+                .isEqualTo("/.well-known/oauth-protected-resource/mcp");
     }
 }

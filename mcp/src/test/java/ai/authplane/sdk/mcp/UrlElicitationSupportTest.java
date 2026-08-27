@@ -34,8 +34,8 @@ class UrlElicitationSupportTest {
 
         assertThat(mapped.getJsonRpcError().code()).isEqualTo(-32042);
         // The admin-configured consent message is preserved at the top-level JSON-RPC
-        // message (parity with the python/ts SDKs), and the human-readable per-elicitation
-        // message carries the same text plus service context.
+        // message, and the human-readable per-elicitation message carries the same text
+        // plus service context.
         assertThat(mapped.getJsonRpcError().message()).isEqualTo("User must grant access");
 
         @SuppressWarnings("unchecked")
