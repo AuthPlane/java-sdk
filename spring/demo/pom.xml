@@ -27,7 +27,7 @@
 
   <properties>
     <!-- Bumped by the cut-release workflow alongside the default branch's SNAPSHOT version. -->
-    <authplane.sdk.version>1.0.0-SNAPSHOT</authplane.sdk.version>
+    <authplane.sdk.version>0.1.0-SNAPSHOT</authplane.sdk.version>
   </properties>
 
   <dependencyManagement>
