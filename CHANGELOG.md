@@ -23,3 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Migration:** If your configured issuer differs from your authorization server's actual
   identifier by a trailing slash, correct the config — the SDK no longer silently reconciles them.
+
+### Fixed
+
+- Deriving a Protected Resource Metadata URL now requires the resource identifier to carry a
+  scheme. A scheme-relative reference such as `//api.example.com/mcp` is neither opaque nor
+  authority-less, so it cleared the derivation gate and produced
+  `null://api.example.com/.well-known/oauth-protected-resource/mcp` — a URL the SDK then published
+  in the `resource_metadata` parameter of the 401 `WWW-Authenticate` challenge, where no client
+  could resolve it. Such an identifier is now rejected at derivation, naming the missing
+  component. RFC 8707 §2 requires an absolute URI, which RFC 3986 §4.3 defines as always carrying
+  a scheme, so no valid identifier is affected.
+- The derived Protected Resource Metadata URL now carries the resource identifier's authority
+  verbatim. It was built from `URI.getAuthority()`, which percent-decodes, so an identifier whose
+  userinfo contained an encoded `@` (`https://u%40b@api.example.com/mcp`) derived
+  `https://u@b@api.example.com/…` — an authority with two `@` delimiters where the identifier
+  names one. The raw authority is now used, matching the derived path, which already preserved
+  its percent-encoded octets.

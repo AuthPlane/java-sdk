@@ -79,6 +79,25 @@ class ProtectedResourceMetadataTest {
     }
 
     @Test
+    void schemeRelativeResource_cannotDeriveAPrmUrl() {
+        // A scheme-relative reference is neither opaque nor authority-less, so it cleared a gate
+        // that tested only those two. The derivation then read a null scheme and emitted
+        // "null://api.example.com/.well-known/oauth-protected-resource/mcp", which
+        // AuthplaneResource.prmUrl() hands straight to the resource_metadata parameter of the
+        // 401 challenge — a URL no client can resolve.
+        assertThatThrownBy(
+                        () ->
+                                ProtectedResourceMetadata.wellKnownPath(
+                                        URI.create("//api.example.com/mcp")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("a scheme and an authority");
+
+        assertThatThrownBy(() -> ProtectedResourceMetadata.wellKnownUrl("//api.example.com/mcp"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("a scheme and an authority");
+    }
+
+    @Test
     void wellKnownPath_stripsEveryTerminatingSlash() {
         // Stripping only one slash made wellKnownPath and wellKnownUrl disagree on a doubled
         // slash — the exact invariant this pair is supposed to hold.
@@ -120,6 +139,16 @@ class ProtectedResourceMetadataTest {
         // trailing-slash resource URL still resolves to the slash-less well-known document.
         assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com/mcp/"))
                 .isEqualTo("https://api.example.com/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
+    void wellKnownUrl_preservesRawAuthority() {
+        // getAuthority() percent-decodes, so "u%40b@" derived "u@b@" — an authority structurally
+        // different from the one the identifier names (two '@' delimiters instead of one). The
+        // raw-preservation rule applies to the authority exactly as it does to the path.
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://u%40b@api.example.com/mcp"))
+                .isEqualTo(
+                        "https://u%40b@api.example.com/.well-known/oauth-protected-resource/mcp");
     }
 
     @Test
