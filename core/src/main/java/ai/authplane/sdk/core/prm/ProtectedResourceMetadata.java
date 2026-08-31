@@ -116,7 +116,10 @@ public final class ProtectedResourceMetadata {
     public static String wellKnownUrl(String resourceUri) {
         URI uri = URI.create(resourceUri);
         requireDerivable(uri);
-        return uri.getScheme() + "://" + uri.getAuthority() + wellKnownPath(uri);
+        // getRawAuthority(): the raw-preservation rule applies to every component, the authority
+        // included. getAuthority() percent-decodes, so "u%40b@host" derived "u@b@host" — an
+        // authority structurally different from the one the identifier names.
+        return uri.getScheme() + "://" + uri.getRawAuthority() + wellKnownPath(uri);
     }
 
     /**

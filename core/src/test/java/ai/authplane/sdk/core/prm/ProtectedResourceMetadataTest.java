@@ -123,6 +123,16 @@ class ProtectedResourceMetadataTest {
     }
 
     @Test
+    void wellKnownUrl_preservesRawAuthority() {
+        // getAuthority() percent-decodes, so "u%40b@" derived "u@b@" — an authority structurally
+        // different from the one the identifier names (two '@' delimiters instead of one). The
+        // raw-preservation rule applies to the authority exactly as it does to the path.
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://u%40b@api.example.com/mcp"))
+                .isEqualTo(
+                        "https://u%40b@api.example.com/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
     void toMap_containsAllRequiredFields() {
         var prm =
                 ProtectedResourceMetadata.builder()

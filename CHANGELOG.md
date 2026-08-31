@@ -23,3 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Migration:** If your configured issuer differs from your authorization server's actual
   identifier by a trailing slash, correct the config — the SDK no longer silently reconciles them.
+
+### Fixed
+
+- The derived Protected Resource Metadata URL now carries the resource identifier's authority
+  verbatim. It was built from `URI.getAuthority()`, which percent-decodes, so an identifier whose
+  userinfo contained an encoded `@` (`https://u%40b@api.example.com/mcp`) derived
+  `https://u@b@api.example.com/…` — an authority with two `@` delimiters where the identifier
+  names one. The raw authority is now used, matching the derived path, which already preserved
+  its percent-encoded octets.
