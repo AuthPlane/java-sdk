@@ -159,14 +159,23 @@ public final class ProtectedResourceMetadata {
      *     and an authority
      * @return the full PRM document URL
      * @throws IllegalArgumentException if {@code resourceUri} is opaque, has no scheme, has no
-     *     authority, or carries a fragment component
+     *     authority, carries userinfo, carries a fragment component, or carries a query outside the
+     *     RFC 3986 §3.4 grammar
      */
     public static String wellKnownUrl(String resourceUri) {
         // Before URI.create: an identifier that is both malformed and fragment-bearing should
         // report the fragment, which is the illegal part, rather than a wrapped URISyntaxException.
         // requireDerivable is left to wellKnownPath — calling it here as well only duplicated the
         // answer.
+        //
+        // All four construction gates run here, not two. The reason the backstops exist at all is
+        // that this method is public and reachable with a string no constructor ever saw, and that
+        // reason does not distinguish between them: without requireNoUserinfo,
+        // wellKnownUrl("https://svc:pw@h/mcp") still splices a credential into the URL this SDK
+        // publishes in a 401 challenge.
         requireNoFragment(resourceUri);
+        requireScheme(resourceUri);
+        requireNoUserinfo(resourceUri);
         requireValidQuery(resourceUri);
         URI uri = URI.create(resourceUri);
         // getRawAuthority(): the raw-preservation rule applies to every component, the authority
@@ -494,24 +503,6 @@ public final class ProtectedResourceMetadata {
     }
 
     /**
-     * Bounds {@code [start, end)} of the authority component of a fragment-free identifier, or
-     * {@code null} when it has none. Shared by {@link #requireNoUserinfo(String)} and {@link
-     * #elideSecrets(String)} so the gate and the redactor can never disagree about where the
-     * authority is.
-     *
-     * <p>A leading {@code //} is tested <em>before</em> the {@code ://} of an absolute URI, never
-     * the other way round: index 0 cannot be preceded by a scheme, so a scheme-relative reference
-     * (RFC 3986 §4.2) opens its authority at index 2 and a later {@code ://} in its path or query
-     * is not an authority delimiter. Testing {@code ://} first anchored the authority inside the
-     * query of {@code //svc:pw@api.example.com/mcp?next=https://x}, which put the real userinfo
-     * before the supposed authority and made the redactor return the credential verbatim.
-     *
-     * <p>The {@code ://} of an absolute URI is located through {@link #schemeEnd(String)} rather
-     * than by searching for the literal, for the same reason in the other direction: an
-     * authority-less identifier such as {@code https:example.com/mcp?u=http://x} must not have an
-     * authority conjured out of its query.
-     */
-    /**
      * Best-effort authority bounds for {@link #elideSecrets(String)} only, used when {@link
      * #authorityBounds(String)} declines.
      *
@@ -541,6 +532,24 @@ public final class ProtectedResourceMetadata {
         return new int[] {start, end};
     }
 
+    /**
+     * Bounds {@code [start, end)} of the authority component of a fragment-free identifier, or
+     * {@code null} when it has none. Shared by {@link #requireNoUserinfo(String)} and {@link
+     * #elideSecrets(String)} so the gate and the redactor can never disagree about where the
+     * authority is.
+     *
+     * <p>A leading {@code //} is tested <em>before</em> the {@code ://} of an absolute URI, never
+     * the other way round: index 0 cannot be preceded by a scheme, so a scheme-relative reference
+     * (RFC 3986 §4.2) opens its authority at index 2 and a later {@code ://} in its path or query
+     * is not an authority delimiter. Testing {@code ://} first anchored the authority inside the
+     * query of {@code //svc:pw@api.example.com/mcp?next=https://x}, which put the real userinfo
+     * before the supposed authority and made the redactor return the credential verbatim.
+     *
+     * <p>The {@code ://} of an absolute URI is located through {@link #schemeEnd(String)} rather
+     * than by searching for the literal, for the same reason in the other direction: an
+     * authority-less identifier such as {@code https:example.com/mcp?u=http://x} must not have an
+     * authority conjured out of its query.
+     */
     private static int[] authorityBounds(String beforeFragment) {
         int start;
         if (beforeFragment.startsWith("//")) {

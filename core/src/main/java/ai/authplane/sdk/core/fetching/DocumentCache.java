@@ -210,10 +210,52 @@ public class DocumentCache {
         }
     }
 
-    /** Forces a cache refresh regardless of TTL. */
+    /**
+     * Forces a cache refresh regardless of TTL, but not regardless of the failure backoff.
+     *
+     * <p>The backoff applies here for the same reason it applies to {@link #get()}: the caller is
+     * on a request path. {@code JwksCache.getKeyByKid(kid, true)} is reached on every {@code kid}
+     * the cached document does not hold, which is exactly the state a rotation to an unreachable
+     * {@code jwks_uri} leaves the process in — tokens arrive signed with keys the old document does
+     * not carry. Fetching unconditionally there costs a full HTTP timeout per verification, on the
+     * caller's thread and serialized behind {@code fetchLock}, which is the failure this cache's
+     * backoff exists to prevent. It is also an amplification surface: an unauthenticated caller
+     * presenting tokens with unknown {@code kid} values would drive one fetch per request.
+     *
+     * <p>While backing off, the currently held document is returned. A caller that finds no usable
+     * key in it fails that verification, which is the correct outcome — the alternative is paying a
+     * doomed network round trip first.
+     */
     public Map<String, Object> forceRefresh() throws Exception {
+        return doForceRefresh(false);
+    }
+
+    /**
+     * Forces a refresh even while backing off from a failed one. Named rather than an overload so
+     * it cannot be reached by flipping a boolean at a call site: no request path should call this.
+     * It exists for callers that are asking a question and want the attempt made — a test, or an
+     * administrative refresh — and are prepared to wait for a timeout.
+     */
+    public Map<String, Object> forceRefreshIgnoringFailureBackoff() throws Exception {
+        return doForceRefresh(true);
+    }
+
+    private Map<String, Object> doForceRefresh(boolean ignoreFailureBackoff) throws Exception {
         fetchLock.lock();
         try {
+            long now = nowEpochSeconds();
+            if (!ignoreFailureBackoff
+                    && cachedDocument != null
+                    && now < retryNotBeforeEpochSeconds) {
+                LOG.fine(
+                        () ->
+                                documentType
+                                        + " forced refresh backing off after a failed attempt (retry"
+                                        + " in "
+                                        + (retryNotBeforeEpochSeconds - now)
+                                        + "s); serving the cached copy");
+                return cachedDocument;
+            }
             doFetch(true);
             return cachedDocument;
         } finally {

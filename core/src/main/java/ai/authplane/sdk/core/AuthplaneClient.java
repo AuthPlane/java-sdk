@@ -57,6 +57,9 @@ import ai.authplane.sdk.core.prm.ProtectedResourceMetadata;
 @SuppressWarnings("checkstyle:FinalClass")
 public class AuthplaneClient implements AutoCloseable {
 
+    /** Depth bound for the cause walk in {@link #isInterrupt}; see the comment there. */
+    private static final int MAX_CAUSE_HOPS = 16;
+
     private static final Logger LOG = Logger.getLogger(AuthplaneClient.class.getName());
 
     /** Algorithms that must never be allowed. */
@@ -91,8 +94,15 @@ public class AuthplaneClient implements AutoCloseable {
      */
     private volatile long jwksRebindRetryNotBeforeEpochSeconds;
 
-    /** Time source for the rebind backoff. Replaced by the builder so tests can advance it. */
-    private Clock clock = Clock.systemUTC();
+    /**
+     * Time source for the rebind backoff. Replaced by the builder so tests can advance it.
+     *
+     * <p>{@code volatile} for the same reason {@code jwksCacheFactory} is: it is written after the
+     * constructor returns, so it carries none of the JMM final-field guarantees the other infra
+     * fields on this class get. A client published through a data race could otherwise hand a
+     * request thread {@code clock == null}, which NPEs in {@link #rebindJwksIfMoved}.
+     */
+    private volatile Clock clock = Clock.systemUTC();
 
     /**
      * Set by {@link AuthplaneClientBuilder} after construction, alongside {@code jwksCacheFactory},
@@ -522,8 +532,15 @@ public class AuthplaneClient implements AutoCloseable {
      * <p>Checking the thread's own flag would answer a different question: it stays set from an
      * interrupt this call had nothing to do with, and would then silence a real metadata failure.
      */
-    private static boolean isInterrupt(Throwable error) {
-        for (Throwable t = error; t != null; t = t.getCause()) {
+    // Package-private rather than private: the wrapped/unwrapped asymmetry the two call sites
+    // rely on, and the cycle bound below, are both worth pinning directly.
+    static boolean isInterrupt(Throwable error) {
+        // Bounded rather than walked to the end. `initCause` refuses a self-reference, so the
+        // `t.getCause() == t` guard alone looks sufficient — but it does not stop a cycle built
+        // through the `Throwable(String, Throwable)` constructors, where A causes B causes A. That
+        // walk never terminates. No real chain approaches this depth.
+        int hops = 0;
+        for (Throwable t = error; t != null && hops < MAX_CAUSE_HOPS; t = t.getCause(), hops++) {
             if (t instanceof InterruptedException) {
                 return true;
             }
@@ -606,7 +623,9 @@ public class AuthplaneClient implements AutoCloseable {
      */
     void forceMetadataRefreshForTest() throws Exception {
         if (metadataCache != null) {
-            metadataCache.forceRefresh();
+            // Bypasses the failure backoff: a test asking for a refresh wants the attempt made, not
+            // the cached copy handed back. The request-path callers deliberately do not.
+            metadataCache.forceRefreshIgnoringFailureBackoff();
         }
     }
 

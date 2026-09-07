@@ -325,9 +325,12 @@ class ProtectedResourceMetadataTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("a scheme and an authority");
 
+        // wellKnownUrl now reports the missing scheme by name: requireScheme runs as one of its
+        // four backstops and answers before requireDerivable is reached from wellKnownPath. Both
+        // reject; this one says which component is missing.
         assertThatThrownBy(() -> ProtectedResourceMetadata.wellKnownUrl("//api.example.com/mcp"))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("a scheme and an authority");
+                .hasMessageContaining("has no scheme");
     }
 
     @Test
@@ -650,12 +653,19 @@ class ProtectedResourceMetadataTest {
 
     @Test
     void wellKnownUrl_preservesRawAuthority() {
-        // getAuthority() percent-decodes, so "u%40b@" derived "u@b@" — an authority structurally
-        // different from the one the identifier names (two '@' delimiters instead of one). The
-        // raw-preservation rule applies to the authority exactly as it does to the path and query.
-        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://u%40b@api.example.com/mcp?x=1"))
+        // getAuthority() percent-decodes, so an escaped delimiter in the authority derives a
+        // structurally different authority. The vehicle is a percent-escape in the registered name
+        // (RFC 3986 §3.2.2 admits pct-encoded there), not userinfo: userinfo is now refused at
+        // construction and by wellKnownUrl itself, so it can no longer reach this derivation.
+        //
+        // %3A is ":" — decoding it would turn the reg-name "a%3Ab.example.com" into "a:b.example
+        // .com", which reads as host "a" with port "b". Note the escape must be of a *reserved*
+        // octet for raw to be the right answer at all: RFC 3986 §6.2.2.2 has a conformant client
+        // decode escaped *unreserved* octets before comparing, so preserving those raw would make
+        // the derived URL fail to match what the client actually resolves.
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://a%3Ab.example.com/mcp?x=1"))
                 .isEqualTo(
-                        "https://u%40b@api.example.com/.well-known/oauth-protected-resource/mcp?x=1");
+                        "https://a%3Ab.example.com/.well-known/oauth-protected-resource/mcp?x=1");
     }
 
     @Test

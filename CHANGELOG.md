@@ -53,13 +53,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   down would otherwise cost a JWKS fetch per verification — the rebind builds a fresh cache per
   attempt, which has no backoff of its own to inherit. Tokens whose keys are already cached keep
   verifying throughout, and the rebind is still retried until it succeeds, on the backoff instead
-  of on every lookup.
+  of on every lookup. The backoff also governs the forced refresh a `kid` miss triggers, which is
+  the path a rotation puts every token on once the keys in hand are the new ones: without it each
+  such verification paid a full fetch against a failing endpoint, and an unauthenticated caller
+  presenting unknown `kid` values set that rate.
+- `elideSecrets` no longer ships the userinfo of a scheme-relative identifier whose path or query
+  contains a later `://`, such as `//svc:pw@api.example.com/mcp?next=https://x`, in a message that
+  claims to have elided it — the authority is now located by testing the leading `//` first.
+
+### Changed
+
 - A resource identifier carrying userinfo (`https://svc:pw@api.example.com/mcp`) is now rejected at
   construction by the new `ProtectedResourceMetadata.requireNoUserinfo(String)` gate, called from
   `AuthplaneClient.resource(...)`, the `AuthplaneResource` constructor and
   `ProtectedResourceMetadata.Builder#build()`, because the identifier is published verbatim to
   unauthenticated callers (RFC 9110 §4.2.4, RFC 3986 §3.2.1); a host with a port and an opaque
   identifier such as `urn:example:api` are unaffected.
+
+  **Migration:** If `authplane.resource` (or the `resourceUri` passed to
+  `AuthplaneClient.resource(...)`) carries userinfo, remove it — otherwise the resource, and a
+  Spring context that builds one, now fails at startup. Present the credential in the
+  `Authorization` header instead.
+
 - A resource identifier without a scheme is now rejected at construction —
   `AuthplaneClient.resource(...)`, the `AuthplaneResource` constructor, and
   `ProtectedResourceMetadata.Builder#build()` all call the new
@@ -71,11 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authority, or opaque) instead of listing all of them. RFC 8707 §2 requires an absolute URI, which
   RFC 3986 §4.3 defines as always carrying a scheme, so no valid identifier is turned away —
   `urn:example:api` still constructs.
-- `elideSecrets` no longer ships the userinfo of a scheme-relative identifier whose path or query
-  contains a later `://`, such as `//svc:pw@api.example.com/mcp?next=https://x`, in a message that
-  claims to have elided it — the authority is now located by testing the leading `//` first.
 
-### Changed
+  **Migration:** A scheme-relative or relative resource identifier now fails at startup instead of
+  at the first 401. Prefix the intended scheme. `wellKnownUrl` enforces the same four gates as the
+  constructors, so a caller reaching it directly with a string no constructor saw is refused there
+  too rather than splicing a malformed identifier into a challenge.
 
 - The derived Protected Resource Metadata URL now preserves the resource identifier's query
   component. RFC 9728 §3 forms the well-known URI by inserting the well-known string "between the

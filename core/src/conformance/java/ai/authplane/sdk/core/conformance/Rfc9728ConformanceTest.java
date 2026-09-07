@@ -1,6 +1,7 @@
 package ai.authplane.sdk.core.conformance;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 
 import java.net.URI;
@@ -10,7 +11,6 @@ import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
@@ -187,38 +187,44 @@ class Rfc9728ConformanceTest extends AbstractPlaceholderConformanceTest {
     }
 
     @Test
-    @Disabled(
-            "Feature gap: no construction-time scheme-and-host gate exists. The absoluteness axis"
-                    + " was held out when the fragment and query gates landed, pending a decision"
-                    + " that has not been taken, and taking it is not part of adopting the catalog"
-                    + " case.")
     @ConformanceCase("rfc9728-resource-identifier-must-be-an-absolute-url-with-scheme-and-host")
     @ConformanceCoverage(
-            level = ConformanceCoverageLevel.NONE,
+            level = ConformanceCoverageLevel.PARTIAL,
             gaps = {
-                "\"/mcp\" is accepted at construction; it is refused only at derivation",
-                "\"//api.example.com/mcp\" is accepted at construction and at derivation"
+                "the host half is not gated at construction: \"https:example.com/mcp\" carries a"
+                        + " scheme and no authority, and is refused only at derivation"
             },
             note =
-                    "Neither setup value is rejected at the point the resource is constructed, so"
-                            + " the case is unsatisfied on both. requireDerivable in"
-                            + " ProtectedResourceMetadata asks only whether the identifier is"
-                            + " opaque or authority-less and never checks the scheme, and it runs"
-                            + " from wellKnownPath rather than from any construction boundary."
-                            + " \"/mcp\" therefore throws at derivation, on the 401 challenge path,"
-                            + " not from the constructor the stimulus names; and"
-                            + " \"//api.example.com/mcp\" parses with a non-empty authority, so it"
-                            + " clears that guard entirely and derives the literal"
-                            + " \"null://api.example.com/.well-known/oauth-protected-resource/mcp\"."
-                            + " Adding the gate is a behaviour change with its own decision to"
-                            + " make, so this case is registered as skipped rather than marked"
-                            + " covered.")
+                    "Both values the case exercises are now rejected from the resource factory and"
+                            + " from the PRM builder, by requireScheme. PARTIAL rather than FULL"
+                            + " because the requirement is scheme *and* host and only the scheme"
+                            + " half is enforced where the stimulus points: an identifier with a"
+                            + " scheme but no authority still constructs and throws later, on the"
+                            + " 401 challenge path, which is the shape of failure moving these"
+                            + " gates to construction was meant to remove.")
     void rfc9728_resource_identifier_must_be_an_absolute_url_with_scheme_and_host() {
-        // Intentionally empty: implementing the construction-time gate this case asserts is a
-        // behaviour change that is out of scope for adopting the catalog case. When it lands, the
-        // body must assert that each setup value — "/mcp" and "//api.example.com/mcp" — is
-        // rejected on its own from the resource factory and the PRM builder, and that
-        // "http://localhost:8080/mcp" still constructs (the case is scheme-and-host, not
-        // https-only).
+        // Each value rejects on its own — the case is explicit that rejecting one does not satisfy
+        // it, because a guard that only asks "opaque or authority-less?" catches "/mcp" while
+        // letting the scheme-relative form through.
+        for (String identifier : List.of("/mcp", "//api.example.com/mcp")) {
+            assertThatThrownBy(() -> ProtectedResourceMetadata.requireScheme(identifier))
+                    .isInstanceOf(IllegalArgumentException.class);
+
+            assertThatThrownBy(
+                            () ->
+                                    ProtectedResourceMetadata.builder()
+                                            .resource(identifier)
+                                            .authorizationServer(TestFixtures.ISSUER)
+                                            .build())
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        // Scheme-and-host, not https-only: local development loops depend on this one constructing.
+        assertDoesNotThrow(
+                () ->
+                        ProtectedResourceMetadata.builder()
+                                .resource("http://localhost:8080/mcp")
+                                .authorizationServer(TestFixtures.ISSUER)
+                                .build());
     }
 }

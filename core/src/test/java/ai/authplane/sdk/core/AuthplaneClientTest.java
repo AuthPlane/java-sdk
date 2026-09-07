@@ -1001,6 +1001,51 @@ class AuthplaneClientTest {
     }
 
     /**
+     * The kid-miss path is the one a rotation puts every token on, and it reaches the cache through
+     * {@code forceRefresh()} rather than {@code get()}. The rotation test above cannot see this: it
+     * reuses one signing key throughout, so every key its tokens need is already cached and {@code
+     * find(kid, true)} is never called. This one drives the miss directly.
+     *
+     * <p>Without the backoff inside {@code forceRefresh}, each verification below costs a full
+     * fetch against a failing endpoint, on the caller's thread and serialized behind the cache's
+     * fetch lock — and an unauthenticated caller sending unknown kids drives that rate.
+     */
+    @Test
+    void unknownKid_whileJwksIsFailing_doesNotFetchOnEveryVerification() throws Exception {
+        int refreshSeconds = 60;
+        TestFixtures.AdvanceableClock clock = new TestFixtures.AdvanceableClock();
+        AuthplaneClient client = buildClientWithClock(clock, refreshSeconds);
+        AuthplaneResource verifier = client.resource(TestFixtures.RESOURCE, TestFixtures.SCOPES);
+        assertThat(verifier.verify(validToken()).get().claims().sub())
+                .isEqualTo(TestFixtures.SUBJECT);
+
+        // The JWKS endpoint starts failing, and tokens arrive naming a kid the cached document does
+        // not carry — the state a key rotation leaves behind.
+        wireMock.stubFor(get(urlEqualTo("/jwks")).willReturn(aResponse().withStatus(500)));
+        int before = wireMock.findAll(getRequestedFor(urlEqualTo("/jwks"))).size();
+
+        String unknownKidToken =
+                TestFixtures.token().rsaKey(rsaKeys).issuer(baseUrl).kid("rotated-key-2").build();
+
+        assertThatThrownBy(() -> verifier.verify(unknownKidToken).get()).isNotNull();
+        int afterFirstMiss = wireMock.findAll(getRequestedFor(urlEqualTo("/jwks"))).size();
+        assertThat(afterFirstMiss).isGreaterThan(before);
+
+        // Five more misses cost nothing: the failed forced refresh is backing off like any other.
+        for (int i = 0; i < 5; i++) {
+            assertThatThrownBy(() -> verifier.verify(unknownKidToken).get()).isNotNull();
+        }
+        assertThat(wireMock.findAll(getRequestedFor(urlEqualTo("/jwks"))).size())
+                .isEqualTo(afterFirstMiss);
+
+        // Still retried once the backoff elapses — throttled, not abandoned.
+        clock.advanceSeconds(DocumentCache.failureBackoffSeconds(refreshSeconds) + 1);
+        assertThatThrownBy(() -> verifier.verify(unknownKidToken).get()).isNotNull();
+        assertThat(wireMock.findAll(getRequestedFor(urlEqualTo("/jwks"))).size())
+                .isGreaterThan(afterFirstMiss);
+    }
+
+    /**
      * A refresh that returns an invalid document must not displace the good one, and — because the
      * document is what key retrieval is reconciled against — must not be able to repoint it either.
      */
@@ -1098,6 +1143,52 @@ class AuthplaneClientTest {
      * exceed the 30 s ceiling, so the tests below would have kept passing while measuring the wrong
      * thing, and stopped agreeing at any interval under 30.
      */
+    /**
+     * The two call sites of {@code isInterrupt} see the same interrupt differently — {@code
+     * refreshMetadataIfDue} gets it wrapped, because MetadataCache wraps anything that is not a
+     * MetadataFetchException, while {@code rebindJwksIfMoved} gets it bare. Both must restore the
+     * flag, so both shapes have to be recognised.
+     */
+    @Test
+    void isInterrupt_recognisesTheInterruptBareAndWrapped() {
+        assertThat(AuthplaneClient.isInterrupt(new InterruptedException("bare"))).isTrue();
+        assertThat(AuthplaneClient.isInterrupt(new RuntimeException(new InterruptedException())))
+                .isTrue();
+        assertThat(
+                        AuthplaneClient.isInterrupt(
+                                new IllegalStateException(
+                                        new RuntimeException(new InterruptedException()))))
+                .isTrue();
+
+        assertThat(AuthplaneClient.isInterrupt(new RuntimeException("boom"))).isFalse();
+        assertThat(AuthplaneClient.isInterrupt(new RuntimeException(new java.io.IOException())))
+                .isFalse();
+    }
+
+    /**
+     * A cause chain can be made cyclic without reflection: {@code initCause} refuses only a
+     * self-reference and a cause that is already set, so A constructed with cause B, then B given
+     * cause A, closes the loop. {@code getCause() == t} does not catch that shape — the walk is
+     * bounded so it terminates anyway — without the bound the walk never reaches a null cause on
+     * this shape, so it would not fail here, it would not return.
+     */
+    @Test
+    void isInterrupt_terminatesOnACauseCycle() {
+        RuntimeException b = new RuntimeException("b"); // cause deliberately left unset
+        RuntimeException a = new RuntimeException("a", b);
+        b.initCause(a);
+
+        assertThat(b.getCause()).isSameAs(a);
+        assertThat(a.getCause()).isSameAs(b);
+        assertThat(AuthplaneClient.isInterrupt(a)).isFalse();
+
+        // And an interrupt reachable inside a cycle is still found, before the bound is hit.
+        RuntimeException d = new RuntimeException("d");
+        RuntimeException c = new RuntimeException("c", new InterruptedException());
+        d.initCause(c);
+        assertThat(AuthplaneClient.isInterrupt(d)).isTrue();
+    }
+
     private AuthplaneClient buildClientWithClock(Clock clock, int refreshSeconds) throws Exception {
         return register(
                 AuthplaneClient.builder(baseUrl)

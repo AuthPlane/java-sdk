@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -103,9 +104,17 @@ public class AuthplaneResource {
                         resourceUri,
                         this.allowedAlgorithms,
                         options.clockSkewSeconds(),
-                        (kid, force) -> {
-                            client.refreshMetadataIfDue();
-                            return client.jwksCache.getKeyByKid(kid, force);
+                        new JwtValidator.KeyLookup() {
+                            @Override
+                            public void beforeLookup() {
+                                client.refreshMetadataIfDue();
+                            }
+
+                            @Override
+                            public Optional<Map<String, Object>> find(String kid, boolean force)
+                                    throws Exception {
+                                return client.jwksCache.getKeyByKid(kid, force);
+                            }
                         });
     }
 
@@ -394,11 +403,17 @@ public class AuthplaneResource {
         URI base = URI.create(resourceUri);
         String path = URI.create(requestUrl).getRawPath();
         // getRawAuthority(), for the same reason the PRM derivation reads it raw: getAuthority()
-        // percent-decodes, so an identifier whose host carries a percent-escape
-        // ("https://a%2Db.example.com") would yield an htu naming the decoded host — an authority
-        // structurally different from the one the identifier names, which the client's proof can
-        // never match. Userinfo is rejected at construction now, but the escape is not confined to
-        // userinfo: a registered name may carry one too (RFC 3986 §3.2.2).
+        // percent-decodes, so an identifier whose authority carries a percent-escape would yield an
+        // htu naming the decoded form — structurally different from the one the identifier names,
+        // which the client's proof can never match.
+        //
+        // The escape has to be of a *reserved* octet for raw to be the right answer. RFC 3986
+        // §6.2.2.2 requires percent-encoded *unreserved* octets to be decoded before comparison, so
+        // a conformant client normalizes "https://a%2Db.example.com" (%2D is "-") to
+        // "https://a-b.example.com" and sends that — the raw form would fail to match it. The case
+        // this preserves is "https://a%3Ab.example.com", where %3A is ":" and decoding it would
+        // change where the authority ends. Userinfo is rejected at construction now, but the escape
+        // is not confined to userinfo: a registered name may carry one too (RFC 3986 §3.2.2).
         return base.getScheme() + "://" + base.getRawAuthority() + (path == null ? "" : path);
     }
 
