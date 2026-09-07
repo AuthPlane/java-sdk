@@ -10,6 +10,7 @@ import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
@@ -156,5 +157,68 @@ class Rfc9728ConformanceTest extends AbstractPlaceholderConformanceTest {
                         ProtectedResourceMetadata.wellKnownPath(
                                 URI.create("https://api.example.com/mcp/")))
                 .isEqualTo("/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
+    @ConformanceCase("rfc9728-well-known-url-must-preserve-the-resource-query-component")
+    void rfc9728_well_known_url_must_preserve_the_resource_query_component() {
+        // RFC 9728 §3 inserts the well-known string "between the host component and the path
+        // and/or query components", so the query survives the derivation. The stimulus is the
+        // full URL rather than the path, because a path-only accessor cannot express a query.
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com/mcp?tenant=a"))
+                .isEqualTo(
+                        "https://api.example.com/.well-known/oauth-protected-resource/mcp?tenant=a");
+
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com/mcp?tenant=b"))
+                .isEqualTo(
+                        "https://api.example.com/.well-known/oauth-protected-resource/mcp?tenant=b");
+
+        // No path and no terminating slash: §3.1 has no slash to remove, so the suffix goes
+        // directly after the host and the query follows it.
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com?x=1"))
+                .isEqualTo("https://api.example.com/.well-known/oauth-protected-resource?x=1");
+
+        // The point of the case: two identifiers differing only by query must not collapse onto
+        // one metadata document URL, which is what makes every tenant on a host distinct.
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com/mcp?tenant=a"))
+                .isNotEqualTo(
+                        ProtectedResourceMetadata.wellKnownUrl(
+                                "https://api.example.com/mcp?tenant=b"));
+    }
+
+    @Test
+    @Disabled(
+            "Feature gap: no construction-time scheme-and-host gate exists. The absoluteness axis"
+                    + " was held out when the fragment and query gates landed, pending a decision"
+                    + " that has not been taken, and taking it is not part of adopting the catalog"
+                    + " case.")
+    @ConformanceCase("rfc9728-resource-identifier-must-be-an-absolute-url-with-scheme-and-host")
+    @ConformanceCoverage(
+            level = ConformanceCoverageLevel.NONE,
+            gaps = {
+                "\"/mcp\" is accepted at construction; it is refused only at derivation",
+                "\"//api.example.com/mcp\" is accepted at construction and at derivation"
+            },
+            note =
+                    "Neither setup value is rejected at the point the resource is constructed, so"
+                            + " the case is unsatisfied on both. requireDerivable in"
+                            + " ProtectedResourceMetadata asks only whether the identifier is"
+                            + " opaque or authority-less and never checks the scheme, and it runs"
+                            + " from wellKnownPath rather than from any construction boundary."
+                            + " \"/mcp\" therefore throws at derivation, on the 401 challenge path,"
+                            + " not from the constructor the stimulus names; and"
+                            + " \"//api.example.com/mcp\" parses with a non-empty authority, so it"
+                            + " clears that guard entirely and derives the literal"
+                            + " \"null://api.example.com/.well-known/oauth-protected-resource/mcp\"."
+                            + " Adding the gate is a behaviour change with its own decision to"
+                            + " make, so this case is registered as skipped rather than marked"
+                            + " covered.")
+    void rfc9728_resource_identifier_must_be_an_absolute_url_with_scheme_and_host() {
+        // Intentionally empty: implementing the construction-time gate this case asserts is a
+        // behaviour change that is out of scope for adopting the catalog case. When it lands, the
+        // body must assert that each setup value — "/mcp" and "//api.example.com/mcp" — is
+        // rejected on its own from the resource factory and the PRM builder, and that
+        // "http://localhost:8080/mcp" still constructs (the case is scheme-and-host, not
+        // https-only).
     }
 }

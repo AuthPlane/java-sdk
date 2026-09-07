@@ -177,6 +177,8 @@ Both paths use the same `application.properties` keys:
 | `authplane.circuit-breaker-cooldown-seconds` | `0` (SDK default: 30s) | Cooldown before the circuit breaker transitions to half-open |
 | `authplane.token-cache-ttl-buffer-seconds` | `0` (SDK default: 30s) | Buffer in seconds before token cache entries expire |
 
+Both cache TTLs are driven by traffic rather than by a background timer: the first request past the interval pays for the refetch. Verification is what re-reads the AS metadata document, so a Spring resource server that only validates bearer tokens still follows a rotated `jwks_uri` — the metadata read that discovers the new URI rebinds JWKS fetching before the token is verified. A metadata endpoint that is unreachable does not fail authentication; the last known good document keeps being served.
+
 ### Optional Beans
 
 For advanced features that can't be expressed as properties, expose these beans:

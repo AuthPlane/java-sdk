@@ -4,7 +4,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 
-import java.lang.reflect.Method;
+import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -98,9 +98,14 @@ final class ConformanceTestSupport {
         return cursor;
     }
 
-    static void forceMetadataRefresh(AuthplaneClient client) throws Exception {
-        Method method = AuthplaneClient.class.getDeclaredMethod("forceMetadataRefreshForTest");
-        method.setAccessible(true);
-        method.invoke(client);
+    /**
+     * Builds a client whose caches read time from {@code clock}, so a refresh interval can be
+     * crossed by advancing the clock. The client is otherwise ordinary: the suite reaches
+     * refresh-driven behaviour through normal verification calls, never through a test-only
+     * trigger.
+     */
+    static AuthplaneClient buildClient(String issuer, Clock clock, int metadataRefreshSeconds)
+            throws Exception {
+        return TestFixtures.clientWithClock(issuer, clock, metadataRefreshSeconds);
     }
 }

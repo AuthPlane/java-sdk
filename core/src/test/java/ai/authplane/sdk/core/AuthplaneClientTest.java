@@ -4,12 +4,14 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.containing;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
+import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,6 +33,7 @@ import com.github.tomakehurst.wiremock.stubbing.Scenario;
 
 import ai.authplane.sdk.core.errors.MetadataFetchException;
 import ai.authplane.sdk.core.errors.TokenExchangeException;
+import ai.authplane.sdk.core.fetching.DocumentCache;
 import ai.authplane.sdk.core.oauth.IntrospectionResponse;
 
 /**
@@ -40,6 +44,8 @@ import ai.authplane.sdk.core.oauth.IntrospectionResponse;
  * circuit breaker integration.
  */
 class AuthplaneClientTest {
+
+    private static final String WELL_KNOWN_PATH = "/.well-known/oauth-authorization-server";
 
     private static WireMockServer wireMock;
     private static String baseUrl;
@@ -58,11 +64,29 @@ class AuthplaneClientTest {
         wireMock.stop();
     }
 
+    /**
+     * Clients built by this class, closed after every test.
+     *
+     * <p>Closing at the end of each test body leaks the client whenever an assertion above it fails
+     * — which is exactly when a test is already telling you something — and the failure then
+     * arrives with an executor and a JWKS refresh task still attached. Registering here keeps the
+     * cleanup on a path that runs either way, without a try/finally around every test body.
+     */
+    private final List<AuthplaneClient> clients = new ArrayList<>();
+
     @BeforeEach
     void resetStubs() {
         wireMock.resetAll();
         stubMetadata();
         stubJwks();
+    }
+
+    @AfterEach
+    void closeClients() {
+        for (AuthplaneClient client : clients) {
+            client.close();
+        }
+        clients.clear();
     }
 
     // -----------------------------------------------------------------------
@@ -99,15 +123,21 @@ class AuthplaneClientTest {
     }
 
     private AuthplaneClient buildClient() throws Exception {
-        return AuthplaneClient.builder(baseUrl)
-                .devMode(true)
-                .authProvider(new ASCredentials("test-client", "test-secret"))
-                .build()
-                .get();
+        return register(
+                AuthplaneClient.builder(baseUrl)
+                        .devMode(true)
+                        .authProvider(new ASCredentials("test-client", "test-secret"))
+                        .build()
+                        .get());
+    }
+
+    private AuthplaneClient register(AuthplaneClient client) {
+        clients.add(client);
+        return client;
     }
 
     private AuthplaneClient buildClientNoCredentials() throws Exception {
-        return AuthplaneClient.builder(baseUrl).devMode(true).build().get();
+        return register(AuthplaneClient.builder(baseUrl).devMode(true).build().get());
     }
 
     private String validToken() {
@@ -123,7 +153,6 @@ class AuthplaneClientTest {
         AuthplaneClient client = buildClient();
         assertThat(client.issuer()).isEqualTo(baseUrl);
         assertThat(client.devMode()).isTrue();
-        client.close();
     }
 
     @Test
@@ -228,8 +257,6 @@ class AuthplaneClientTest {
         String token = TestFixtures.token().rsaKey(rsaKeys).issuer(issuerWithSlash).build();
         VerifiedClaims claims = verifier.verify(token).get().claims();
         assertThat(claims.issuer()).isEqualTo(issuerWithSlash);
-
-        client.close();
     }
 
     // -----------------------------------------------------------------------
@@ -244,7 +271,6 @@ class AuthplaneClientTest {
         VerifiedClaims claims = verifier.verify(validToken()).get().claims();
         assertThat(claims.sub()).isEqualTo(TestFixtures.SUBJECT);
         assertThat(claims.issuer()).isEqualTo(baseUrl);
-        client.close();
     }
 
     @Test
@@ -256,7 +282,6 @@ class AuthplaneClientTest {
 
         VerifiedClaims claims = verifier.verify(validToken()).get().claims();
         assertThat(claims.sub()).isEqualTo(TestFixtures.SUBJECT);
-        client.close();
     }
 
     @Test
@@ -264,7 +289,6 @@ class AuthplaneClientTest {
         AuthplaneClient client = buildClient();
         assertThatThrownBy(() -> client.resource(null, TestFixtures.SCOPES))
                 .isInstanceOf(NullPointerException.class);
-        client.close();
     }
 
     @Test
@@ -272,6 +296,142 @@ class AuthplaneClientTest {
         AuthplaneClient client = buildClient();
         assertThatThrownBy(() -> client.resource("  ", TestFixtures.SCOPES))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void resource_fragmentInResource_throwsIAE() throws Exception {
+        // RFC 8707 §2 forbids a fragment in a resource indicator. java.net.URI splits it off when
+        // the PRM URL is derived while prmResponse() publishes the identifier verbatim, so the
+        // served document would name an identifier its own URL disagrees with (RFC 9728 §3.3
+        // requires a client to discard it). Reject at construction, not on the 401 path.
+        AuthplaneClient client = buildClient();
+        assertThatThrownBy(
+                        () ->
+                                client.resource(
+                                        TestFixtures.RESOURCE + "/mcp#section",
+                                        TestFixtures.SCOPES))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not include a fragment component")
+                // The fragment itself is elided from the message; the prefix identifies the config.
+                .hasMessageContaining(TestFixtures.RESOURCE + "/mcp")
+                .satisfies(e -> assertThat(e.getMessage()).doesNotContain("section"));
+        client.close();
+    }
+
+    @Test
+    void resourceConstructor_fragmentInResource_throwsIAE() throws Exception {
+        // The constructor gate is what the guarantee rests on — every AuthplaneResource is built
+        // here, including the ones the client factory never sees. Every other fragment case enters
+        // through client.resource(...), which throws at its own gate first, so without this the
+        // authoritative line is the one no test pins: delete it and the suite stays green.
+        AuthplaneClient client = buildClient();
+        assertThatThrownBy(
+                        () ->
+                                new AuthplaneResource(
+                                        client,
+                                        TestFixtures.RESOURCE + "/mcp#section",
+                                        TestFixtures.SCOPES,
+                                        ResourceOptions.defaults()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not include a fragment component");
+        client.close();
+    }
+
+    @Test
+    void resource_schemeRelativeResource_throwsIAE() throws Exception {
+        // RFC 8707 §2 requires an absolute URI, which always begins with a scheme (RFC 3986
+        // §4.3). A scheme-relative identifier used to construct cleanly and then fail at every
+        // sink that splices the scheme — the PRM derivation on the 401 path and the DPoP htu
+        // binding target, both reading the missing scheme as the literal text "null". Reject at
+        // construction, where the operator sees the line they wrote.
+        AuthplaneClient client = buildClient();
+        assertThatThrownBy(() -> client.resource("//api.example.com/mcp", TestFixtures.SCOPES))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("has no scheme");
+        client.close();
+    }
+
+    @Test
+    void resourceConstructor_schemeRelativeResource_throwsIAE() throws Exception {
+        // Same authoritative-line reasoning as the fragment case above: every other scheme-less
+        // identifier enters through client.resource(...), which throws at its own gate first, so
+        // without this test the constructor's gate is the line no test pins.
+        AuthplaneClient client = buildClient();
+        assertThatThrownBy(
+                        () ->
+                                new AuthplaneResource(
+                                        client,
+                                        "//api.example.com/mcp",
+                                        TestFixtures.SCOPES,
+                                        ResourceOptions.defaults()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("has no scheme");
+        client.close();
+    }
+
+    @Test
+    void resource_userinfoInResource_throwsIAE() throws Exception {
+        // RFC 9110 §4.2.4 deprecates userinfo and directs a recipient to reject a URI carrying
+        // it. Here it is a disclosure, not a style question: the identifier is published verbatim
+        // as the PRM `resource` member (served to unauthenticated callers) and in the
+        // resource_metadata parameter of the 401 challenge, so the credential would be handed to
+        // anyone who asks. Reject at construction rather than redacting it at each sink.
+        AuthplaneClient client = buildClient();
+        assertThatThrownBy(
+                        () ->
+                                client.resource(
+                                        "https://svc:s3cr3t@api.example.com/mcp",
+                                        TestFixtures.SCOPES))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not include a userinfo component")
+                // The credential is elided from the message; the host and path identify the
+                // configuration that has to change.
+                .hasMessageContaining("***@api.example.com/mcp")
+                .satisfies(e -> assertThat(e.getMessage()).doesNotContain("s3cr3t"));
+        client.close();
+    }
+
+    @Test
+    void resourceConstructor_userinfoInResource_throwsIAE() throws Exception {
+        // Same authoritative-line reasoning as the fragment and scheme cases above: every other
+        // userinfo-bearing identifier enters through client.resource(...), which throws at its
+        // own gate first, so without this test the constructor's gate is the line no test pins.
+        AuthplaneClient client = buildClient();
+        assertThatThrownBy(
+                        () ->
+                                new AuthplaneResource(
+                                        client,
+                                        "https://svc:s3cr3t@api.example.com/mcp",
+                                        TestFixtures.SCOPES,
+                                        ResourceOptions.defaults()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not include a userinfo component")
+                .satisfies(e -> assertThat(e.getMessage()).doesNotContain("s3cr3t"));
+        client.close();
+    }
+
+    @Test
+    void resource_hostWithPort_isAccepted() throws Exception {
+        // A ':' in the authority is a port delimiter far more often than a userinfo one, so the
+        // userinfo gate must not be a bare scan for ':'. An ordinary host:port identifier still
+        // constructs and is published verbatim.
+        AuthplaneClient client = buildClient();
+        AuthplaneResource verifier =
+                client.resource("https://api.example.com:8443/mcp", TestFixtures.SCOPES);
+        assertThat(verifier.prmResponse())
+                .containsEntry("resource", "https://api.example.com:8443/mcp");
+        client.close();
+    }
+
+    @Test
+    void resource_percentEncodedHashInPath_isAccepted() throws Exception {
+        // "%23" is a literal '#' inside the path, not a fragment delimiter (RFC 3986 §3.5), so the
+        // identifier is fragment-free and must survive the gate.
+        AuthplaneClient client = buildClient();
+        AuthplaneResource verifier =
+                client.resource(TestFixtures.RESOURCE + "/a%23b", TestFixtures.SCOPES);
+        assertThat(verifier.prmResponse())
+                .containsEntry("resource", TestFixtures.RESOURCE + "/a%23b");
         client.close();
     }
 
@@ -280,7 +440,6 @@ class AuthplaneClientTest {
         AuthplaneClient client = buildClient();
         assertThatThrownBy(() -> client.resource(TestFixtures.RESOURCE, null))
                 .isInstanceOf(NullPointerException.class);
-        client.close();
     }
 
     @Test
@@ -291,7 +450,6 @@ class AuthplaneClientTest {
         assertThatThrownBy(() -> client.resource(TestFixtures.RESOURCE, TestFixtures.SCOPES, opts))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("HS256");
-        client.close();
     }
 
     // -----------------------------------------------------------------------
@@ -318,7 +476,6 @@ class AuthplaneClientTest {
 
         assertThat(resp.accessToken()).isEqualTo("exchanged");
         assertThat(resp.expiresIn()).isEqualTo(1800);
-        client.close();
     }
 
     @Test
@@ -343,7 +500,6 @@ class AuthplaneClientTest {
                 .isInstanceOf(ExecutionException.class)
                 .cause()
                 .isInstanceOf(TokenExchangeException.class);
-        client.close();
     }
 
     @Test
@@ -388,7 +544,6 @@ class AuthplaneClientTest {
         assertThat(resp1.accessToken()).isEqualTo("first-exchange");
         assertThat(resp2.accessToken()).isEqualTo("first-exchange");
         wireMock.verify(1, postRequestedFor(urlEqualTo("/token")));
-        client.close();
     }
 
     @Test
@@ -435,7 +590,6 @@ class AuthplaneClientTest {
         assertThat(resp1.accessToken()).isEqualTo("first-default-ttl");
         assertThat(resp2.accessToken()).isEqualTo("first-default-ttl");
         wireMock.verify(1, postRequestedFor(urlEqualTo("/token")));
-        client.close();
     }
 
     @Test
@@ -485,7 +639,6 @@ class AuthplaneClientTest {
         assertThat(resp1.accessToken()).isEqualTo("subject-token-1-issued");
         assertThat(resp2.accessToken()).isEqualTo("subject-token-2-issued");
         wireMock.verify(2, postRequestedFor(urlEqualTo("/token")));
-        client.close();
     }
 
     // -----------------------------------------------------------------------
@@ -513,7 +666,6 @@ class AuthplaneClientTest {
         wireMock.verify(
                 postRequestedFor(urlEqualTo("/token"))
                         .withRequestBody(containing("grant_type=client_credentials")));
-        client.close();
     }
 
     @Test
@@ -533,7 +685,6 @@ class AuthplaneClientTest {
         wireMock.verify(
                 postRequestedFor(urlEqualTo("/token"))
                         .withRequestBody(containing("resource=https%3A%2F%2Fapi.example.com")));
-        client.close();
     }
 
     @Test
@@ -565,7 +716,6 @@ class AuthplaneClientTest {
         wireMock.verify(
                 postRequestedFor(urlEqualTo("/token"))
                         .withHeader("Authorization", equalTo("Basic second")));
-        client.close();
     }
 
     @Test
@@ -576,7 +726,6 @@ class AuthplaneClientTest {
                 .cause()
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("authProvider");
-        client.close();
     }
 
     // -----------------------------------------------------------------------
@@ -598,7 +747,6 @@ class AuthplaneClientTest {
 
         assertThat(resp.active()).isTrue();
         assertThat(resp.raw()).containsEntry("sub", "user-123");
-        client.close();
     }
 
     @Test
@@ -615,7 +763,6 @@ class AuthplaneClientTest {
         IntrospectionResponse resp = client.introspect("revoked-token").get();
 
         assertThat(resp.active()).isFalse();
-        client.close();
     }
 
     // -----------------------------------------------------------------------
@@ -632,7 +779,6 @@ class AuthplaneClientTest {
         wireMock.verify(
                 postRequestedFor(urlEqualTo("/revoke"))
                         .withRequestBody(containing("token=token-to-revoke")));
-        client.close();
     }
 
     // -----------------------------------------------------------------------
@@ -736,8 +882,250 @@ class AuthplaneClientTest {
     }
 
     // -----------------------------------------------------------------------
-    // jwks_uri rotation via metadata change callback
+    // jwks_uri rotation, reconciled on the verification path
     // -----------------------------------------------------------------------
+
+    /**
+     * A rebind that fails must be retried, not stranded.
+     *
+     * <p>The metadata cache publishes a refreshed document before anything acts on it, so a rebind
+     * driven by the document *changing* gets exactly one attempt: every later refresh returns that
+     * same document, and the change never fires again. One 503 at the new URI while the old one is
+     * withdrawn would then reject every token for the life of the process. Reconciling the binding
+     * against the document instead means the next key lookup simply tries again.
+     */
+    @Test
+    void jwksUriRotation_transientFailureAtTheNewUri_recoversOnALaterLookup() throws Exception {
+        int refreshSeconds = 60;
+        TestFixtures.AdvanceableClock clock = new TestFixtures.AdvanceableClock();
+        AuthplaneClient client = buildClientWithClock(clock, refreshSeconds);
+        AuthplaneResource verifier = client.resource(TestFixtures.RESOURCE, TestFixtures.SCOPES);
+        assertThat(verifier.verify(validToken()).get().claims().sub())
+                .isEqualTo(TestFixtures.SUBJECT);
+
+        // The AS moves its key set to /jwks2 and withdraws /jwks. /jwks2 is down.
+        TestFixtures.RSAKeyPair rotatedKeys = TestFixtures.generateRsaKeyPair();
+        wireMock.stubFor(get(urlEqualTo("/jwks2")).willReturn(aResponse().withStatus(503)));
+        wireMock.stubFor(get(urlEqualTo("/jwks")).willReturn(aResponse().withStatus(404)));
+        stubMetadataWithJwksUri(baseUrl + "/jwks2");
+
+        clock.advanceSeconds(refreshSeconds + 1);
+
+        // Both key pairs publish the same kid, so the withdrawn key set still answers the lookup
+        // and the token fails on the signature — the shape a stranded binding takes in production.
+        String rotatedToken = TestFixtures.token().rsaKey(rotatedKeys).issuer(baseUrl).build();
+        assertThatThrownBy(() -> verifier.verify(rotatedToken).get())
+                .isInstanceOf(ExecutionException.class);
+        assertThat(client.jwksCache.getUrl()).isEqualTo(baseUrl + "/jwks");
+
+        // The new endpoint comes up. Nothing else changes — in particular the metadata document is
+        // byte-identical to the one already cached, so there is no edge left for a change-triggered
+        // rebind to fire on.
+        wireMock.stubFor(
+                get(urlEqualTo("/jwks2"))
+                        .willReturn(
+                                aResponse()
+                                        .withStatus(200)
+                                        .withHeader("Content-Type", "application/json")
+                                        .withBody(
+                                                TestFixtures.serializeMap(
+                                                        rotatedKeys.jwksDocument()))));
+
+        // The failed attempt above put the rebind in backoff, so recovery is deferred rather than
+        // immediate — that is the trade for not paying an HTTP timeout on every lookup during the
+        // outage. The binding is still stale here, and the token still fails, without a fetch.
+        assertThatThrownBy(() -> verifier.verify(rotatedToken).get())
+                .isInstanceOf(ExecutionException.class);
+        assertThat(client.jwksCache.getUrl()).isEqualTo(baseUrl + "/jwks");
+
+        clock.advanceSeconds(DocumentCache.failureBackoffSeconds(refreshSeconds) + 1);
+
+        assertThat(verifier.verify(rotatedToken).get().claims().sub())
+                .isEqualTo(TestFixtures.SUBJECT);
+        assertThat(client.jwksCache.getUrl()).isEqualTo(baseUrl + "/jwks2");
+    }
+
+    /**
+     * A rotated {@code jwks_uri} that is down must not cost a JWKS fetch on every verification.
+     *
+     * <p>Reconciling the binding against the document means the mismatch is re-detected on every
+     * key lookup, so without a backoff every lookup pays a full HTTP timeout for as long as the new
+     * endpoint stays down — on a low-QPS resource server that is every request, and the caches' own
+     * backoff cannot help because the factory builds a fresh {@code JwksCache} per attempt. Tokens
+     * whose keys are already cached never needed that fetch to succeed; they only needed it not to
+     * block them.
+     */
+    @Test
+    void jwksUriRotation_newUriDown_retriesOnBackoffRatherThanEveryVerification() throws Exception {
+        int refreshSeconds = 60;
+        TestFixtures.AdvanceableClock clock = new TestFixtures.AdvanceableClock();
+        AuthplaneClient client = buildClientWithClock(clock, refreshSeconds);
+        AuthplaneResource verifier = client.resource(TestFixtures.RESOURCE, TestFixtures.SCOPES);
+        assertThat(verifier.verify(validToken()).get().claims().sub())
+                .isEqualTo(TestFixtures.SUBJECT);
+
+        // The AS moves its key set, and the new endpoint is down. The old one keeps serving, so
+        // every key these tokens need is already cached and verification is never in danger — the
+        // rebind is the only thing failing.
+        wireMock.stubFor(get(urlEqualTo("/jwks2")).willReturn(aResponse().withStatus(500)));
+        stubMetadataWithJwksUri(baseUrl + "/jwks2");
+        clock.advanceSeconds(refreshSeconds + 1);
+
+        assertThat(verifier.verify(validToken()).get().claims().sub())
+                .isEqualTo(TestFixtures.SUBJECT);
+        // One rebind attempt. Counted rather than asserted as a literal: the SSRF-safe fetcher
+        // walks every address `localhost` resolves to, so a single attempt is more than one
+        // request here. What the finding is about is whether this number grows per verification.
+        int requestsAfterFirstAttempt =
+                wireMock.findAll(getRequestedFor(urlEqualTo("/jwks2"))).size();
+        assertThat(requestsAfterFirstAttempt).isGreaterThan(0);
+
+        for (int i = 0; i < 5; i++) {
+            assertThat(verifier.verify(validToken()).get().claims().sub())
+                    .isEqualTo(TestFixtures.SUBJECT);
+        }
+
+        // Unchanged: five more verifications cost nothing. Before the backoff each one paid a full
+        // JWKS fetch at the dead endpoint, on the thread the caller is blocked on.
+        assertThat(wireMock.findAll(getRequestedFor(urlEqualTo("/jwks2"))).size())
+                .isEqualTo(requestsAfterFirstAttempt);
+        assertThat(client.jwksCache.getUrl()).isEqualTo(baseUrl + "/jwks");
+
+        // The mismatch persists, so it is still retried — on the backoff rather than on every
+        // lookup. This is the reconcile property the previous round established, unchanged.
+        clock.advanceSeconds(DocumentCache.failureBackoffSeconds(refreshSeconds) + 1);
+        assertThat(verifier.verify(validToken()).get().claims().sub())
+                .isEqualTo(TestFixtures.SUBJECT);
+        assertThat(wireMock.findAll(getRequestedFor(urlEqualTo("/jwks2"))).size())
+                .isEqualTo(requestsAfterFirstAttempt * 2);
+    }
+
+    /**
+     * A refresh that returns an invalid document must not displace the good one, and — because the
+     * document is what key retrieval is reconciled against — must not be able to repoint it either.
+     */
+    @Test
+    void metadataRefresh_invalidDocument_keepsTheGoodDocumentAndTheJwksBinding() throws Exception {
+        int refreshSeconds = 60;
+        TestFixtures.AdvanceableClock clock = new TestFixtures.AdvanceableClock();
+        AuthplaneClient client = buildClientWithClock(clock, refreshSeconds);
+        AuthplaneResource verifier = client.resource(TestFixtures.RESOURCE, TestFixtures.SCOPES);
+        assertThat(verifier.verify(validToken()).get().claims().sub())
+                .isEqualTo(TestFixtures.SUBJECT);
+
+        // The endpoint starts answering for a different issuer, pointing jwks_uri at a key set the
+        // SDK must never fetch (RFC 8414 §3.3).
+        TestFixtures.RSAKeyPair foreignKeys = TestFixtures.generateRsaKeyPair();
+        wireMock.stubFor(
+                get(urlEqualTo("/jwks-foreign"))
+                        .willReturn(
+                                aResponse()
+                                        .withStatus(200)
+                                        .withHeader("Content-Type", "application/json")
+                                        .withBody(
+                                                TestFixtures.serializeMap(
+                                                        foreignKeys.jwksDocument()))));
+        wireMock.stubFor(
+                get(urlEqualTo(WELL_KNOWN_PATH))
+                        .willReturn(
+                                aResponse()
+                                        .withStatus(200)
+                                        .withHeader("Content-Type", "application/json")
+                                        .withBody(
+                                                TestFixtures.serializeMap(
+                                                        Map.of(
+                                                                "issuer",
+                                                                "https://evil.example.com",
+                                                                "jwks_uri",
+                                                                baseUrl + "/jwks-foreign")))));
+
+        clock.advanceSeconds(refreshSeconds + 1);
+
+        assertThat(verifier.verify(validToken()).get().claims().sub())
+                .isEqualTo(TestFixtures.SUBJECT);
+        assertThat(client.jwksCache.getUrl()).isEqualTo(baseUrl + "/jwks");
+        assertThat(requestCount("/jwks-foreign"))
+                .as("a document that failed validation must not repoint key retrieval")
+                .isZero();
+    }
+
+    /**
+     * An unreachable metadata endpoint costs neither a failed verification nor a network round trip
+     * per verification. {@code doFetch} advances the cache timestamp only on success, so without a
+     * retry backoff the document stays permanently expired and every lookup pays a full HTTP
+     * timeout — on a request path, behind an exclusive lock.
+     */
+    @Test
+    void metadataEndpointDown_verificationKeepsWorkingAndTheRefreshBacksOff() throws Exception {
+        int refreshSeconds = 60;
+        TestFixtures.AdvanceableClock clock = new TestFixtures.AdvanceableClock();
+        AuthplaneClient client = buildClientWithClock(clock, refreshSeconds);
+        AuthplaneResource verifier = client.resource(TestFixtures.RESOURCE, TestFixtures.SCOPES);
+        verifier.verify(validToken()).get();
+
+        wireMock.stubFor(get(urlEqualTo(WELL_KNOWN_PATH)).willReturn(aResponse().withStatus(500)));
+        clock.advanceSeconds(refreshSeconds + 1);
+
+        int readsBeforeOutage = requestCount(WELL_KNOWN_PATH);
+        assertThat(verifier.verify(validToken()).get().claims().sub())
+                .as("keys the JWKS cache already holds must still verify")
+                .isEqualTo(TestFixtures.SUBJECT);
+        int readsAfterOneAttempt = requestCount(WELL_KNOWN_PATH);
+        assertThat(readsAfterOneAttempt)
+                .as("the refresh was attempted")
+                .isGreaterThan(readsBeforeOutage);
+
+        for (int i = 0; i < 4; i++) {
+            assertThat(verifier.verify(validToken()).get().claims().sub())
+                    .isEqualTo(TestFixtures.SUBJECT);
+        }
+        assertThat(requestCount(WELL_KNOWN_PATH))
+                .as("a failed refresh must back off, not retry on every verification")
+                .isEqualTo(readsAfterOneAttempt);
+
+        clock.advanceSeconds(31); // past the backoff
+        verifier.verify(validToken()).get();
+        assertThat(requestCount(WELL_KNOWN_PATH))
+                .as("the retry resumes once the backoff elapses")
+                .isGreaterThan(readsAfterOneAttempt);
+    }
+
+    /**
+     * Sets both refresh intervals to the same value.
+     *
+     * <p>Only the metadata one used to be set, which left the rebind backoff — computed from the
+     * JWKS interval — reading a knob the test never named. The two agreed at 60 only because both
+     * exceed the 30 s ceiling, so the tests below would have kept passing while measuring the wrong
+     * thing, and stopped agreeing at any interval under 30.
+     */
+    private AuthplaneClient buildClientWithClock(Clock clock, int refreshSeconds) throws Exception {
+        return register(
+                AuthplaneClient.builder(baseUrl)
+                        .devMode(true)
+                        .metadataRefreshSeconds(refreshSeconds)
+                        .jwksRefreshSeconds(refreshSeconds)
+                        .clock(clock)
+                        .build()
+                        .get());
+    }
+
+    private void stubMetadataWithJwksUri(String jwksUri) {
+        wireMock.stubFor(
+                get(urlEqualTo(WELL_KNOWN_PATH))
+                        .willReturn(
+                                aResponse()
+                                        .withStatus(200)
+                                        .withHeader("Content-Type", "application/json")
+                                        .withBody(
+                                                TestFixtures.serializeMap(
+                                                        Map.of(
+                                                                "issuer", baseUrl,
+                                                                "jwks_uri", jwksUri)))));
+    }
+
+    private static int requestCount(String path) {
+        return wireMock.countRequestsMatching(getRequestedFor(urlEqualTo(path)).build()).getCount();
+    }
 
     @Test
     void jwksUriRotation_updatesJwksCache() throws Exception {
@@ -785,8 +1173,6 @@ class AuthplaneClientTest {
         AuthplaneResource verifier2 = client.resource(TestFixtures.RESOURCE, TestFixtures.SCOPES);
         VerifiedClaims rotatedClaims = verifier2.verify(rotatedToken).get().claims();
         assertThat(rotatedClaims.sub()).isEqualTo(TestFixtures.SUBJECT);
-
-        client.close();
     }
 
     // -----------------------------------------------------------------------
@@ -834,8 +1220,6 @@ class AuthplaneClientTest {
                 .cause()
                 .isInstanceOf(TokenExchangeException.class)
                 .hasMessageContaining("Circuit breaker");
-
-        client.close();
     }
 
     @Test
@@ -867,8 +1251,6 @@ class AuthplaneClientTest {
         }
 
         assertThat(client.circuitBreaker.state()).isNotEqualTo(CircuitBreaker.State.OPEN);
-
-        client.close();
     }
 
     // -----------------------------------------------------------------------
@@ -907,8 +1289,6 @@ class AuthplaneClientTest {
         // Second call with same scope should return cached token
         TokenResponse resp2 = client.clientCredentials(List.of("read"), List.of()).get();
         assertThat(resp2.accessToken()).isEqualTo("cached");
-
-        client.close();
     }
 
     // -----------------------------------------------------------------------
@@ -959,7 +1339,6 @@ class AuthplaneClientTest {
 
         // Only one POST should have been made
         wireMock.verify(1, postRequestedFor(urlEqualTo("/token")));
-        client.close();
     }
 
     @Test
@@ -1002,7 +1381,6 @@ class AuthplaneClientTest {
 
         // Only one POST
         wireMock.verify(1, postRequestedFor(urlEqualTo("/token")));
-        client.close();
     }
 
     // -----------------------------------------------------------------------
@@ -1024,7 +1402,6 @@ class AuthplaneClientTest {
                         .get();
 
         assertThat(client.issuer()).isEqualTo(baseUrl);
-        client.close();
     }
 
     private static Throwable rootCause(Throwable throwable) {

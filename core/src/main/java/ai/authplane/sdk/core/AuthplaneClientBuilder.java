@@ -1,11 +1,11 @@
 package ai.authplane.sdk.core;
 
+import java.time.Clock;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import ai.authplane.sdk.core.dpop.OutboundDPoPOptions;
@@ -44,6 +44,7 @@ public final class AuthplaneClientBuilder {
     private TokenCacheConfig tokenCacheConfig = TokenCacheConfig.defaults();
     private OutboundDPoPOptions outboundDPoP = null;
     private Executor executor = null;
+    private Clock clock = Clock.systemUTC();
 
     AuthplaneClientBuilder(String issuer) {
         Objects.requireNonNull(issuer, "issuer must not be null");
@@ -74,6 +75,19 @@ public final class AuthplaneClientBuilder {
     /** Sets the metadata background-refresh interval in seconds. */
     public AuthplaneClientBuilder metadataRefreshSeconds(int seconds) {
         this.metadataRefreshSeconds = seconds;
+        return this;
+    }
+
+    /**
+     * Sets the time source the metadata and JWKS caches use to evaluate their TTLs.
+     *
+     * <p>Package-private: production callers have no reason to run the caches on anything but the
+     * system clock. It exists so tests can drive refresh intervals by advancing a clock rather than
+     * sleeping against wall time, which is the only way to assert refresh behaviour without a
+     * shortened interval racing the CI runner.
+     */
+    AuthplaneClientBuilder clock(Clock clock) {
+        this.clock = Objects.requireNonNull(clock, "clock must not be null");
         return this;
     }
 
@@ -190,13 +204,15 @@ public final class AuthplaneClientBuilder {
                         metadataRefreshSeconds,
                         issuer,
                         effectiveFetchSettings.allowHttp(),
-                        null);
+                        null,
+                        clock);
         metadataCache.fetch();
 
         String resolvedJwksUri = metadataCache.getJwksUri();
         LOG.info(() -> "Discovered JWKS URI: " + resolvedJwksUri);
 
-        JwksCache jwksCache = new JwksCache(fetcher, resolvedJwksUri, jwksRefreshSeconds, null);
+        JwksCache jwksCache =
+                new JwksCache(fetcher, resolvedJwksUri, jwksRefreshSeconds, null, clock);
         jwksCache.fetch();
 
         CircuitBreaker circuitBreaker =
@@ -220,15 +236,25 @@ public final class AuthplaneClientBuilder {
                         outboundDPoP,
                         effectiveExecutor);
 
-        wireMetadataCallback(client, metadataCache, fetcher);
+        client.setClock(clock);
+        client.jwksCacheFactory =
+                jwksUri -> {
+                    JwksCache newCache =
+                            new JwksCache(fetcher, jwksUri, jwksRefreshSeconds, null, clock);
+                    newCache.fetch();
+                    return newCache;
+                };
+        wireMetadataCallback(metadataCache);
         return client;
     }
 
-    private void wireMetadataCallback(
-            AuthplaneClient client, MetadataCache metadataCache, DocumentFetcher fetcher) {
-        // Safe from concurrent races: the MetadataCache invokes this callback
-        // inside its fetchLock, so jwks_uri rotation is serialized even if
-        // multiple background refreshes overlap.
+    /**
+     * Logs the AS endpoints a refresh moved. The {@code jwks_uri} is deliberately not handled here:
+     * a change callback is edge-triggered, and {@code DocumentCache} publishes the new document
+     * before it fires, so a rebind that failed could never be retried. {@link
+     * AuthplaneClient#refreshMetadataIfDue()} reconciles that binding against the document instead.
+     */
+    private void wireMetadataCallback(MetadataCache metadataCache) {
         metadataCache.setOnChangeCallback(
                 (oldDoc, newDoc) -> {
                     Object newEp = newDoc.get("introspection_endpoint");
@@ -241,31 +267,6 @@ public final class AuthplaneClientBuilder {
                     Object oldTe = oldDoc.get("token_endpoint");
                     if (!Objects.equals(oldTe, newTe)) {
                         LOG.info(() -> "AS token_endpoint changed to: " + newTe);
-                    }
-
-                    Object newUriObj = newDoc.get("jwks_uri");
-                    if (!(newUriObj instanceof String newUri)) return;
-                    if (newUri.equals(client.jwksCache.getUrl())) return;
-
-                    LOG.warning(
-                            "jwks_uri changed from '"
-                                    + client.jwksCache.getUrl()
-                                    + "' to '"
-                                    + newUri
-                                    + "', restarting JWKS cache");
-
-                    JwksCache newCache = new JwksCache(fetcher, newUri, jwksRefreshSeconds, null);
-                    try {
-                        newCache.fetch();
-                        client.jwksCache = newCache;
-                        LOG.info(() -> "JWKS cache restarted with new URI: " + newUri);
-                    } catch (Exception e) {
-                        LOG.log(
-                                Level.WARNING,
-                                "Failed to initialise new JWKS cache for URI: "
-                                        + newUri
-                                        + ". Keeping existing cache.",
-                                e);
                     }
                 });
     }

@@ -5,9 +5,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 
+import ai.authplane.sdk.core.TestFixtures;
 import ai.authplane.sdk.core.errors.MetadataFetchException;
 
 /**
@@ -217,4 +219,148 @@ class MetadataCacheTest {
 
         assertThatThrownBy(cache::getJwksUri).isInstanceOf(MetadataFetchException.class);
     }
+
+    // -----------------------------------------------------------------------
+    // Validation at fetch time rather than read time
+    //
+    // The cases above all reject on the *first* fetch, which passed whether validation ran before
+    // or after the document was published. What follows is the part that only fetch-time
+    // validation gets right: a refresh that returns an invalid document must leave the good one in
+    // place and must not reach the change callback, which is what rebinds key retrieval.
+    // -----------------------------------------------------------------------
+
+    @Test
+    void refreshWithWrongIssuer_keepsServingTheLastValidDocument() throws Exception {
+        AtomicInteger fetches = new AtomicInteger();
+        AtomicInteger callbackCalls = new AtomicInteger();
+        TestFixtures.AdvanceableClock clock = new TestFixtures.AdvanceableClock();
+        DocumentFetcher fetcher =
+                url ->
+                        CompletableFuture.completedFuture(
+                                new FetchResult(
+                                        fetches.incrementAndGet() == 1
+                                                ? Map.of(
+                                                        "issuer",
+                                                        ISSUER,
+                                                        "jwks_uri",
+                                                        ISSUER + "/jwks")
+                                                : Map.of(
+                                                        "issuer", "https://evil.example.com",
+                                                        "jwks_uri",
+                                                                "https://evil.example.com/jwks"),
+                                        null));
+        MetadataCache cache =
+                new MetadataCache(
+                        fetcher,
+                        ISSUER + "/.well-known/oauth-authorization-server",
+                        100,
+                        ISSUER,
+                        false,
+                        (old, next) -> callbackCalls.incrementAndGet(),
+                        clock);
+        cache.fetch();
+
+        clock.advanceSeconds(101); // past the TTL, so the read below re-fetches
+
+        assertThat(cache.getJwksUri())
+                .as("the rejected refresh must not displace the good document")
+                .isEqualTo(ISSUER + "/jwks");
+        assertThat(fetches.get()).as("the refresh was attempted").isEqualTo(2);
+        assertThat(callbackCalls.get())
+                .as("a document that failed validation must not reach the change callback")
+                .isZero();
+    }
+
+    @Test
+    void refreshWithoutJwksUri_keepsServingTheLastValidDocument() throws Exception {
+        // Same shape as the wrong-issuer case, on the one field the refresh mechanism itself runs
+        // on. Presence used to be checked at read time, so a document without jwks_uri passed
+        // validation, was published, and displaced the good one — after which
+        // AuthplaneClient.refreshMetadataIfDue had nothing left to reconcile the binding against
+        // and every verification raised the failure again, on the request path, with nothing to
+        // rate-limit it: the fetch had succeeded, so no backoff applied.
+        AtomicInteger fetches = new AtomicInteger();
+        AtomicInteger callbackCalls = new AtomicInteger();
+        TestFixtures.AdvanceableClock clock = new TestFixtures.AdvanceableClock();
+        DocumentFetcher fetcher =
+                url ->
+                        CompletableFuture.completedFuture(
+                                new FetchResult(
+                                        fetches.incrementAndGet() == 1
+                                                ? Map.of(
+                                                        "issuer",
+                                                        ISSUER,
+                                                        "jwks_uri",
+                                                        ISSUER + "/jwks")
+                                                : Map.of("issuer", ISSUER),
+                                        null));
+        MetadataCache cache =
+                new MetadataCache(
+                        fetcher,
+                        ISSUER + "/.well-known/oauth-authorization-server",
+                        100,
+                        ISSUER,
+                        false,
+                        (old, next) -> callbackCalls.incrementAndGet(),
+                        clock);
+        cache.fetch();
+
+        clock.advanceSeconds(101); // past the TTL, so the read below re-fetches
+
+        assertThat(cache.getJwksUri())
+                .as("the rejected refresh must not displace the good document")
+                .isEqualTo(ISSUER + "/jwks");
+        assertThat(fetches.get()).as("the refresh was attempted").isEqualTo(2);
+        assertThat(callbackCalls.get())
+                .as("a document that failed validation must not reach the change callback")
+                .isZero();
+
+        // And the rejection is now a failed refresh, so it backs off like one rather than being
+        // re-raised on every read.
+        assertThat(cache.getJwksUri()).isEqualTo(ISSUER + "/jwks");
+        assertThat(fetches.get()).as("the rejected refresh backs off").isEqualTo(2);
+    }
+
+    @Test
+    void refreshFailure_isNotRetriedOnEveryRead() throws Exception {
+        AtomicInteger fetches = new AtomicInteger();
+        TestFixtures.AdvanceableClock clock = new TestFixtures.AdvanceableClock();
+        DocumentFetcher fetcher =
+                url ->
+                        fetches.incrementAndGet() == 1
+                                ? CompletableFuture.completedFuture(
+                                        new FetchResult(
+                                                Map.of(
+                                                        "issuer",
+                                                        ISSUER,
+                                                        "jwks_uri",
+                                                        ISSUER + "/jwks"),
+                                                null))
+                                : CompletableFuture.failedFuture(new RuntimeException("down"));
+        MetadataCache cache =
+                new MetadataCache(
+                        fetcher,
+                        ISSUER + "/.well-known/oauth-authorization-server",
+                        100,
+                        ISSUER,
+                        false,
+                        null,
+                        clock);
+        cache.fetch();
+
+        clock.advanceSeconds(101);
+
+        for (int i = 0; i < 5; i++) {
+            assertThat(cache.getJwksUri()).isEqualTo(ISSUER + "/jwks");
+        }
+        assertThat(fetches.get())
+                .as("a failed refresh backs off instead of retrying on every read")
+                .isEqualTo(2);
+
+        clock.advanceSeconds(31); // past the backoff
+        assertThat(cache.getJwksUri()).isEqualTo(ISSUER + "/jwks");
+        assertThat(fetches.get()).as("the retry resumes once the backoff elapses").isEqualTo(3);
+    }
+
+    /** Manually advanced clock, so TTL expiry is driven rather than waited on. */
 }

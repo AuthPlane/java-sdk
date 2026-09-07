@@ -1,5 +1,6 @@
 package ai.authplane.sdk.core.fetching;
 
+import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -21,7 +22,30 @@ public class JwksCache extends DocumentCache {
             String jwksUrl,
             int refreshSeconds,
             BiConsumer<Map<String, Object>, Map<String, Object>> onChangeCallback) {
-        super(fetcher, jwksUrl, refreshSeconds, "JWKS", onChangeCallback);
+        this(fetcher, jwksUrl, refreshSeconds, onChangeCallback, Clock.systemUTC());
+    }
+
+    /**
+     * Same as the four-argument constructor, but with the time source used for TTL evaluation
+     * supplied by the caller.
+     *
+     * <p>Supported public API, not a test seam: this class has no {@code internal} package and no
+     * binary-compatibility gate, so anything public here is contract. It is the only way an
+     * embedder can drive refresh intervals deterministically — from a simulation clock, or from a
+     * test that states elapsed time instead of waiting for it. The superclass keeps the equivalent
+     * constructor package-private because {@code DocumentCache} is never constructed directly by a
+     * caller outside this package.
+     *
+     * @param clock time source; pass {@link Clock#systemUTC()} unless driving TTL expiry
+     *     deterministically
+     */
+    public JwksCache(
+            DocumentFetcher fetcher,
+            String jwksUrl,
+            int refreshSeconds,
+            BiConsumer<Map<String, Object>, Map<String, Object>> onChangeCallback,
+            Clock clock) {
+        super(fetcher, jwksUrl, refreshSeconds, "JWKS", onChangeCallback, clock);
     }
 
     /**

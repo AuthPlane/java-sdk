@@ -18,6 +18,10 @@ import ai.authplane.sdk.core.prm.ProtectedResourceMetadata;
  * Servlet that serves an RFC 9728 Protected Resource Metadata document as JSON.
  *
  * <p>Register it at the path returned by {@link ProtectedResourceMetadata#wellKnownPath(URI)}.
+ * Registration is path-keyed: a query component of the resource identifier appears in the
+ * advertised PRM URL (RFC 9728 §3) but does not change the registration path — this servlet serves
+ * the same document whatever query string a request carries. Serving distinct documents per query
+ * value is not supported.
  *
  * <p>Example:
  *

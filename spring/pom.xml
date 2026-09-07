@@ -134,6 +134,17 @@
       <artifactId>mcp-json-jackson3</artifactId>
       <scope>test</scope>
     </dependency>
+
+    <!--
+      Spring test fixtures (MockHttpServletRequest/Response) — used to drive
+      the PRM RouterFunction with a real request. Same version as spring-webmvc.
+    -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-test</artifactId>
+      <version>7.0.8</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <repositories>

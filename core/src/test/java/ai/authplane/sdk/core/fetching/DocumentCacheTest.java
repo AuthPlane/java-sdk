@@ -10,11 +10,14 @@ import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 class DocumentCacheTest {
 
@@ -194,6 +197,68 @@ class DocumentCacheTest {
         void advanceSeconds(long seconds) {
             nowSeconds.addAndGet(seconds);
         }
+    }
+
+    // A regression here blocks rather than returning the wrong value, and in CI a hang is not
+    // the same as a failure: it burns the job's wall clock and surfaces as a build timeout
+    // instead of a named test. The bound turns it back into a failure that says what broke.
+    @Test
+    @Timeout(10)
+    void get_whileARefreshIsInFlight_servesTheCurrentCopyInsteadOfQueueing() throws Exception {
+        // The lock-free read is a semantic change to a public method, not a performance tweak:
+        // once a refresh is in flight, get() returns the published document without honouring
+        // expiry. That is deliberate — on the verification path the alternative is every caller
+        // queueing behind one network round trip — but it is only exercised when fetchLock is
+        // actually contended, which no single-threaded test does.
+        CountDownLatch fetchStarted = new CountDownLatch(1);
+        CountDownLatch releaseFetch = new CountDownLatch(1);
+        AtomicInteger fetchCount = new AtomicInteger();
+        TestClock clock = new TestClock();
+        DocumentFetcher fetcher =
+                url ->
+                        CompletableFuture.supplyAsync(
+                                () -> {
+                                    if (fetchCount.incrementAndGet() > 1) {
+                                        fetchStarted.countDown();
+                                        try {
+                                            releaseFetch.await();
+                                        } catch (InterruptedException e) {
+                                            Thread.currentThread().interrupt();
+                                            throw new CompletionException(e);
+                                        }
+                                        return new FetchResult(DOC_V2, null);
+                                    }
+                                    return new FetchResult(DOC_V1, null);
+                                });
+        cache = cacheWith(fetcher, 100, clock);
+        cache.fetch();
+
+        clock.advanceSeconds(101); // expired, so the refresher below takes the synchronous branch
+
+        Thread refresher =
+                new Thread(
+                        () -> {
+                            try {
+                                cache.get();
+                            } catch (Exception e) {
+                                throw new IllegalStateException(e);
+                            }
+                        });
+        refresher.start();
+        assertThat(fetchStarted.await(5, TimeUnit.SECONDS))
+                .as("the refresh reached the fetcher and is holding fetchLock")
+                .isTrue();
+
+        // Returns while the refresh is still blocked — asserted by ordering rather than by a
+        // timeout: releaseFetch has not been counted down yet, so a get() that queued behind the
+        // lock could not have returned at all.
+        assertThat(cache.get()).isEqualTo(DOC_V1);
+        assertThat(fetchCount.get()).as("no second fetch was started").isEqualTo(2);
+
+        releaseFetch.countDown();
+        refresher.join(5_000);
+        assertThat(refresher.isAlive()).isFalse();
+        assertThat(cache.get()).isEqualTo(DOC_V2);
     }
 
     private static DocumentCache cacheWith(DocumentFetcher fetcher, int ttl) {

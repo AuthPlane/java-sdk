@@ -7,6 +7,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 
 import java.util.List;
@@ -28,6 +29,7 @@ import ai.authplane.sdk.core.VerifiedClaims;
 import ai.authplane.sdk.core.fetching.FetchSettings;
 import ai.authplane.sdk.core.fetching.HttpTransport;
 import ai.authplane.sdk.core.oauth.ClientCredentialsGrant;
+import ai.authplane.sdk.core.prm.ProtectedResourceMetadata;
 
 @ConformanceSuite
 class Rfc8707ConformanceTest extends AbstractPlaceholderConformanceTest {
@@ -138,5 +140,48 @@ class Rfc8707ConformanceTest extends AbstractPlaceholderConformanceTest {
                 postRequestedFor(urlEqualTo("/token"))
                         .withRequestBody(containing("resource=https%3A%2F%2Fapi-one.example.com"))
                         .withRequestBody(containing("resource=https%3A%2F%2Fapi-two.example.com")));
+    }
+
+    @Test
+    @ConformanceCase("rfc8707-resource-indicator-must-not-contain-a-fragment")
+    void rfc8707_resource_indicator_must_not_contain_a_fragment() {
+        ConformanceTestSupport.stubMetadata(
+                wireMock, Map.of("issuer", baseUrl, "jwks_uri", baseUrl + "/jwks"));
+        AuthplaneClient client =
+                assertDoesNotThrow(() -> ConformanceTestSupport.buildClient(baseUrl));
+
+        // The case is satisfied only by a rejection observable from the construction call itself
+        // (RFC 8707 §2, RFC 9728 §1.2). Asserted on the operator-facing factory, which is the
+        // `resource.create` stimulus, so a gate that moved to the derivation helpers would fail
+        // here rather than pass on a fragment silently dropped at prmUrl() time.
+        assertThatThrownBy(
+                        () ->
+                                ConformanceTestSupport.buildVerifier(
+                                        client,
+                                        "https://api.example.com/mcp#section",
+                                        List.of("read:data")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not include a fragment component");
+
+        // Same gate on the PRM builder: an identifier reaching the document through the builder
+        // rather than through a resource must not get past construction either.
+        assertThatThrownBy(
+                        () ->
+                                ProtectedResourceMetadata.builder()
+                                        .resource("https://api.example.com/mcp#section")
+                                        .authorizationServer("https://auth.example.com")
+                                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not include a fragment component");
+
+        // A fragment-free identifier is unaffected — the gate rejects the fragment, it does not
+        // narrow what a resource identifier may otherwise be.
+        assertThatCode(
+                        () ->
+                                ConformanceTestSupport.buildVerifier(
+                                        client,
+                                        "https://api.example.com/mcp",
+                                        List.of("read:data")))
+                .doesNotThrowAnyException();
     }
 }

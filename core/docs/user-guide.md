@@ -212,8 +212,8 @@ Every builder method on `AuthplaneClient.builder(...)`:
 |---|---|---|---|
 | `devMode(boolean)` | `boolean` | `false` | Relax SSRF — allow HTTP, localhost, private networks. Overrides `fetchSettings` unless the latter is explicitly set |
 | `fetchSettings(FetchSettings)` | `FetchSettings` | — | Full control over SSRF / fetch behaviour; overrides `devMode` |
-| `jwksRefreshSeconds(int)` | `int` | `300` | JWKS background-refresh interval |
-| `metadataRefreshSeconds(int)` | `int` | `3600` | AS metadata background-refresh interval |
+| `jwksRefreshSeconds(int)` | `int` | `300` | JWKS refresh interval |
+| `metadataRefreshSeconds(int)` | `int` | `3600` | AS metadata refresh interval |
 | `authProvider(AuthProvider)` | `AuthProvider` | `null` | AS authentication for token / introspection / revocation calls. Pass `new ASCredentials(clientId, clientSecret)` for static HTTP Basic, or a custom provider for credential rotation / non-Basic schemes |
 | `outboundDPoP(OutboundDPoPOptions)` | `OutboundDPoPOptions` | `null` | Enables DPoP proofs on AS POSTs and `dpopHeaders(...)` |
 | `executor(Executor)` | `Executor` | `ForkJoinPool.commonPool()` | Executor for all async work. **Production deployments should supply a dedicated executor** — the common pool has limited parallelism (CPU cores − 1) and is shared JVM-wide |
@@ -223,6 +223,8 @@ Every builder method on `AuthplaneClient.builder(...)`:
 | `build()` | — | — | Returns `CompletableFuture<AuthplaneClient>` after validation + discovery + initial JWKS fetch |
 
 `AUTHPLANE_DEV_MODE=true` in the environment flips `devMode` on at build time.
+
+Both refresh intervals are driven by traffic, not by a background timer: the first call past the interval pays for the refetch. For the metadata document that call is a `verify()` — a resource server that only verifies tokens therefore still tracks the AS. When `jwks_uri` changes, the metadata read that discovers it rebinds JWKS fetching to the new URI before the token in hand is verified, and if that rebind fails (the new endpoint is briefly down) the next key lookup retries it. A metadata endpoint that is unreachable never fails verification: the last known good document keeps being served, and a failed refresh is not retried on the network for another 30 seconds.
 
 ### `ResourceOptions`
 
@@ -467,7 +469,7 @@ Well-known path derivation:
 | `https://api.example.com/mcp` | `/.well-known/oauth-protected-resource/mcp` |
 | `https://api.example.com/v2/mcp` | `/.well-known/oauth-protected-resource/v2/mcp` |
 
-`ProtectedResourceMetadata.wellKnownUrl(String resourceUri)` returns the full URL. The framework adapters (`authplane-mcp`, `authplane-spring`) register the servlet/router automatically — this is only needed when writing your own adapter.
+`ProtectedResourceMetadata.wellKnownUrl(String resourceUri)` returns the full URL. If the resource identifier carries a query component, the returned URL carries it verbatim (`https://api.example.com/mcp?tenant=a` → `https://api.example.com/.well-known/oauth-protected-resource/mcp?tenant=a`) while routing stays path-keyed — the derivation table above is unaffected. The framework adapters (`authplane-mcp`, `authplane-spring`) register the servlet/router automatically — this is only needed when writing your own adapter.
 
 ### Dev mode
 

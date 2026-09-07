@@ -140,18 +140,19 @@ class RfcXxxxConformanceTest {
 
 ## Known gaps
 
-There are **no `not_run` cases** — every catalog case has a test implementation, and all
-implemented cases are `passed` in `conformance-report.md`.
-
-Two cases carry **partial** coverage rather than full:
+There are **no `not_run` cases** — every catalog case has a test implementation. Three cases carry
+less than full coverage:
 
 | Case ID | RFC | Coverage | Reason |
 |---------|-----|----------|--------|
 | `rfc9449-dpop-inbound-nonce-must-be-validated-when-required` | RFC 9449 §8 | partial (`@Disabled`) | Server-issued inbound nonce enforcement is not yet implemented. RFC 9449 §8 allows but does not require resource servers to enforce nonces. Documented via `@ConformanceCoverage` on the test. |
 | `rfc9449-dpop-proof-jwk-must-not-include-private-key-material` | RFC 9449 §4.2 | partial (passed) | The proof is rejected as `invalid_dpop_proof`, but the Java SDK does not surface a stable private-key-material diagnostic independent of Nimbus's parsing error. Documented via `@ConformanceCoverage` on the test. |
+| `rfc9728-resource-identifier-must-be-an-absolute-url-with-scheme-and-host` | RFC 9728 §3, RFC 8707 §2 | none (`@Disabled`) | No construction-time scheme-and-host gate exists. Neither `/mcp` nor `//api.example.com/mcp` is refused where the case's stimulus requires it, so the case is registered as skipped rather than marked covered. Adding the gate is a behaviour change awaiting its own decision. Documented via `@ConformanceCoverage` on the test. |
 
 ## Definition of done for a conformance case
 
 - Status is `passed` in `conformance-report.md`
 - Coverage level is `full`, or `partial` with all gaps documented in `@ConformanceCoverage`
+- A case the SDK does not implement is registered and `@Disabled` with a reason, and reports
+  `skipped` with coverage `none` — never marked covered, and never left to surface as `not_run`
 - No uncatalogued tests (every test method has a `@ConformanceCase` mapping)
