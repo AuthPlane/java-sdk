@@ -115,7 +115,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   percent-escape) passed construction and then threw out of the 401 response path — a 500 in place
   of the challenge. Nothing is escaped on the operator's behalf: rewriting the query would change
   the resource's identity. Neither the authority nor the path is gated — both were always part of
-  the derived URL and are unchanged here — and closing them is tracked separately.
+  the derived URL and are unchanged here — and closing them is tracked in #29.
 
   The DPoP `htu` derived by `AuthplaneResource.normalizeRequestUrl` now reads the raw authority
   too. Previously a percent-encoded userinfo was decoded into it, so the server computed
@@ -146,7 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `resource` form parameter that `ClientCredentialsGrant` and `TokenExchange` send to the
   authorization server is *not* gated: that parameter carries whatever string the caller passes to
   the grant, not the configured resource identifier, and it is the RFC 8707 §2 indicator in its
-  primary role. Closing it is tracked separately.
+  primary role. Closing it is tracked in #30.
 
   **Migration:** If `authplane.resource` (or the `resourceUri` passed to
   `AuthplaneClient.resource(...)`) contains a `#`, remove the fragment — otherwise the resource,
