@@ -73,9 +73,11 @@ public final class ProtectedResourceMetadata {
      * verbatim rather than decoded into a path separator — decoding it would name a different path
      * than the resource identifier does.
      *
-     * @param resourceUri the resource server URI; must be hierarchical and carry an authority
+     * @param resourceUri the resource server URI; must be hierarchical and carry a scheme and an
+     *     authority
      * @return the URL path (including leading slash) where the PRM should be served
-     * @throws IllegalArgumentException if {@code resourceUri} is opaque or has no authority
+     * @throws IllegalArgumentException if {@code resourceUri} is opaque, has no scheme, or has no
+     *     authority
      */
     public static String wellKnownPath(URI resourceUri) {
         requireDerivable(resourceUri);
@@ -108,15 +110,19 @@ public final class ProtectedResourceMetadata {
      * <p>The path component is derived by {@link #wellKnownPath(URI)}, so both helpers agree by
      * construction: the slash stripping happens in exactly one place.
      *
-     * @param resourceUri the resource server URI string; must be hierarchical and carry an
-     *     authority
+     * @param resourceUri the resource server URI string; must be hierarchical and carry a scheme
+     *     and an authority
      * @return the full PRM document URL
-     * @throws IllegalArgumentException if {@code resourceUri} is opaque or has no authority
+     * @throws IllegalArgumentException if {@code resourceUri} is opaque, has no scheme, or has no
+     *     authority
      */
     public static String wellKnownUrl(String resourceUri) {
         URI uri = URI.create(resourceUri);
         requireDerivable(uri);
-        return uri.getScheme() + "://" + uri.getAuthority() + wellKnownPath(uri);
+        // getRawAuthority(): the raw-preservation rule applies to every component, the authority
+        // included. getAuthority() percent-decodes, so "u%40b@host" derived "u@b@host" — an
+        // authority structurally different from the one the identifier names.
+        return uri.getScheme() + "://" + uri.getRawAuthority() + wellKnownPath(uri);
     }
 
     /**
@@ -127,16 +133,26 @@ public final class ProtectedResourceMetadata {
      * an opaque URI has no authority and no hierarchical path, so there is no PRM URL to publish
      * for it: the derivation would otherwise emit {@code urn://null/.well-known/...} and hand that
      * to the {@code resource_metadata} parameter of the 401 challenge.
+     *
+     * <p>The scheme is gated for the same reason, and needs its own test: a scheme-relative
+     * reference such as {@code //api.example.com/mcp} is neither opaque nor authority-less, so it
+     * clears both of the checks above. The derivation then reads a null scheme and emits {@code
+     * null://api.example.com/.well-known/oauth-protected-resource/mcp} into that same challenge
+     * parameter. RFC 8707 §2 requires the resource indicator to be an absolute URI, and RFC 3986
+     * §4.3 defines one as always carrying a scheme, so no legitimate identifier is turned away.
      */
     private static void requireDerivable(URI resourceUri) {
-        if (resourceUri.isOpaque() || resourceUri.getAuthority() == null) {
+        if (resourceUri.isOpaque()
+                || resourceUri.getScheme() == null
+                || resourceUri.getAuthority() == null) {
             throw new IllegalArgumentException(
                     "Cannot derive a Protected Resource Metadata URL from \""
                             + resourceUri
                             + "\": PRM derivation requires a hierarchical resource identifier with"
-                            + " an authority (e.g. https://api.example.com/mcp). The resource"
-                            + " identifier itself may be any absolute URI permitted by RFC 8707 §2"
-                            + " and is stored verbatim; only the derivation is restricted.");
+                            + " a scheme and an authority (e.g. https://api.example.com/mcp). The"
+                            + " resource identifier itself may be any absolute URI permitted by RFC"
+                            + " 8707 §2 and is stored verbatim; only the derivation is"
+                            + " restricted.");
         }
     }
 
