@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A server cache directive that is not in the future no longer makes the document permanently
+  expired. `Cache-Control: no-store` and `no-cache` parse to an expiry of `0`, `max-age=0` to the
+  current second, and a stale `Expires:` to a past one; the effective TTL was computed by
+  subtracting the cache timestamp from that, so any of them produced a *negative* TTL — about
+  -1.7e9 for `no-store`. A negative TTL is expired on every read, so every read took the
+  synchronous re-fetch branch on the caller's thread, and the failure backoff could not help
+  because it only arms when a fetch throws: an endpoint answering `no-store` successfully cleared
+  the backoff and re-armed the expiry on the same call. Such an expiry is now treated as no
+  preference and the configured interval governs. This was latent while nothing on a verification
+  path read the metadata cache; the change above puts it there, before signature verification, so
+  an unauthenticated caller would otherwise have set the fetch rate against the authorization
+  server.
+
 - Authorization server metadata is now re-read under ordinary verification traffic, so
   `metadataRefreshSeconds` takes effect on a resource server that only verifies tokens. Such a
   server never calls the token, introspection or revocation endpoints, so nothing on its request
@@ -107,7 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   question, not settled by this change, and tracked.
 
   **Migration:** A scheme-relative or relative resource identifier now fails at startup instead of
-  at the first 401. Prefix the intended scheme. `wellKnownUrl` enforces the same four gates as the
+  at the first 401. Prefix the intended scheme. `wellKnownUrl` enforces the same four gates (in a
+  different order, so the component named in the message can differ from a constructor's) as the
   constructors, so a caller reaching it directly with a string no constructor saw is refused there
   too rather than splicing a malformed identifier into a challenge.
 

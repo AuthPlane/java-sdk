@@ -366,9 +366,35 @@ public class DocumentCache {
         return failureBackoffSeconds(configuredRefreshSeconds);
     }
 
+    /**
+     * The TTL actually in force: the configured interval, shortened by a server expiry when the
+     * server asks for something sooner.
+     *
+     * <p>A server expiry at or before the moment the document was cached is treated as **no
+     * preference** rather than as an expiry, and the configured interval governs. It has to be:
+     * {@code CacheHeaderParser.parseExpiresAt} returns {@code 0L} for {@code Cache-Control:
+     * no-store} or {@code no-cache}, {@code now} for {@code max-age=0}, and a past epoch for a
+     * stale {@code Expires:} — and subtracting {@code cachedAtEpochSeconds} from any of those
+     * yields a negative TTL. For {@code no-store} that is about -1.7e9.
+     *
+     * <p>A negative TTL makes {@code age >= effectiveTtl} true on every read, so {@link #get()}
+     * takes the synchronous re-fetch branch on the caller's thread every single time, forever. The
+     * failure backoff does not cover it, because that only arms when a fetch *throws*: an endpoint
+     * that answers {@code no-store} successfully clears the backoff and re-arms the expiry on the
+     * same call.
+     *
+     * <p>That was harmless while nothing on a verification path read this cache. It stopped being
+     * harmless when metadata moved onto that path — verification now reads through here before
+     * every key lookup, and that runs before signature verification, so an unauthenticated caller
+     * would set the rate. This is the same failure the backoff was added to remove, reached by a
+     * different door.
+     *
+     * <p>go-sdk clamps the equivalent case the same way: a zero expiry falls back to the configured
+     * default rather than being taken literally.
+     */
     private long effectiveTtlSeconds() {
-        long configuredExpiry = cachedAtEpochSeconds + configuredRefreshSeconds;
-        if (serverExpiresAtSeconds != null) {
+        if (serverExpiresAtSeconds != null && serverExpiresAtSeconds > cachedAtEpochSeconds) {
+            long configuredExpiry = cachedAtEpochSeconds + configuredRefreshSeconds;
             return Math.min(configuredExpiry, serverExpiresAtSeconds) - cachedAtEpochSeconds;
         }
         return configuredRefreshSeconds;

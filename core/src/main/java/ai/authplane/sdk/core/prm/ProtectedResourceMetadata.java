@@ -438,8 +438,15 @@ public final class ProtectedResourceMetadata {
      *
      * <p>Called from the same construction boundaries as the sibling gates — {@link
      * Builder#build()}, the {@code AuthplaneResource} constructor, and {@code
-     * AuthplaneClient.resource(...)} — and last of the four, so an identifier that is also
-     * scheme-relative is reported for the missing scheme, the defect an operator fixes first.
+     * AuthplaneClient.resource(...)} — after {@link #requireScheme(String)}, so an identifier that
+     * is also scheme-relative is reported for the missing scheme, the defect an operator fixes
+     * first.
+     *
+     * <p>The four gates run in the same *set* everywhere but not in the same *order*: the three
+     * construction sites run fragment, query, scheme, userinfo, while {@link #wellKnownUrl(String)}
+     * runs fragment, scheme, userinfo, query. So an identifier that violates two of them can be
+     * reported for a different component depending on the entrypoint. Both reject either way; only
+     * the message differs. Unifying the four behind one private gate is tracked.
      *
      * @param resourceUri the resource identifier, as configured by the operator
      * @throws IllegalArgumentException if the identifier's authority carries a userinfo component

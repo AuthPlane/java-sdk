@@ -136,6 +136,74 @@ class DocumentCacheTest {
         assertThat(fetchCount.get()).isEqualTo(2);
     }
 
+    /**
+     * A server expiry that is not in the future is no expiry at all.
+     *
+     * <p>`Cache-Control: no-store` and `no-cache` parse to `0L`, `max-age=0` to `now`, and a stale
+     * `Expires:` to a past epoch. Subtracting the cache timestamp from any of those gives a
+     * negative TTL, which makes the document permanently expired: every read takes the synchronous
+     * re-fetch branch, on the caller's thread. The failure backoff cannot help, because a
+     * `no-store` endpoint that *answers* clears it and re-arms the expiry on the same call.
+     *
+     * <p>This matters now that verification reads through the metadata cache on every key lookup —
+     * and does so before signature verification, so an unauthenticated caller would set the fetch
+     * rate against the authorization server.
+     */
+    @Test
+    void get_serverExpiryNotInTheFuture_fallsBackToTheConfiguredInterval() throws Exception {
+        // 0L is what no-store and no-cache parse to; -1 stands for a stale Expires: header.
+        for (long serverExpiry : new long[] {0L, -1L}) {
+            AtomicInteger fetchCount = new AtomicInteger();
+            TestClock clock = new TestClock();
+            DocumentFetcher fetcher =
+                    url -> {
+                        fetchCount.incrementAndGet();
+                        return CompletableFuture.completedFuture(
+                                new FetchResult(DOC_V1, serverExpiry));
+                    };
+            cache = cacheWith(fetcher, 300, clock);
+            cache.fetch();
+            assertThat(fetchCount.get()).isEqualTo(1);
+
+            for (int i = 0; i < 5; i++) {
+                assertThat(cache.get()).isEqualTo(DOC_V1);
+            }
+            assertThat(fetchCount.get())
+                    .as(
+                            "server expiry %s must not make the document permanently expired",
+                            serverExpiry)
+                    .isEqualTo(1);
+
+            clock.advanceSeconds(301);
+            cache.get();
+            assertThat(fetchCount.get())
+                    .as("the configured interval still governs for server expiry %s", serverExpiry)
+                    .isEqualTo(2);
+        }
+    }
+
+    /**
+     * A server expiry exactly at the cache timestamp is the max-age=0 case, and behaves the same.
+     */
+    @Test
+    void get_serverExpiryEqualToCachedAt_fallsBackToTheConfiguredInterval() throws Exception {
+        AtomicInteger fetchCount = new AtomicInteger();
+        TestClock clock = new TestClock();
+        DocumentFetcher fetcher =
+                url -> {
+                    fetchCount.incrementAndGet();
+                    return CompletableFuture.completedFuture(
+                            new FetchResult(DOC_V1, clock.instant().getEpochSecond()));
+                };
+        cache = cacheWith(fetcher, 300, clock);
+        cache.fetch();
+
+        for (int i = 0; i < 5; i++) {
+            cache.get();
+        }
+        assertThat(fetchCount.get()).as("max-age=0 must not cost a fetch per read").isEqualTo(1);
+    }
+
     @Test
     void get_serverExpiresTtl_usesMinOfConfiguredAndServer() throws Exception {
         // Server says the document expires 10s from now; the configured TTL is 300s. The
