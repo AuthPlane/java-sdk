@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `JwksCache` and `MetadataCache` gained public constructors taking a `java.time.Clock`, so the
   refresh intervals can be driven from an injected time source rather than the wall clock. Additive;
   the existing constructors are unchanged and delegate with `Clock.systemUTC()`.
+- `DocumentCache.forceRefreshIgnoringFailureBackoff()` — public, and the only way to force a
+  fetch while a failed refresh is backing off. It exists for a caller that is asking a question
+  and wants the attempt made rather than the cached answer, and is prepared to wait for a
+  timeout: an administrative refresh, or a test. It is named rather than a boolean on
+  `forceRefresh` so no request path reaches it by flipping an argument, and no request path
+  should.
 
 ### Fixed
 
@@ -63,6 +69,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `DocumentCache.forceRefresh()` now respects the failure backoff instead of fetching
+  unconditionally, and returns the currently held document when a refresh is backing off or
+  already in flight. This is a public method, inherited by the public `JwksCache` and
+  `MetadataCache`, so an embedder calling it during a backoff window now gets a cached document
+  back — and the return type cannot say which happened. It changed because the SDK's own
+  request path reaches it: `JwksCache.getKeyByKid(kid, true)` is called on every `kid` the
+  cached document does not hold, which is the state a rotation to an unreachable `jwks_uri`
+  leaves behind, and fetching unconditionally there cost a full HTTP timeout per verification.
+  Use `forceRefreshIgnoringFailureBackoff()` if you need the old unconditional behaviour.
+
 - A resource identifier carrying userinfo (`https://svc:pw@api.example.com/mcp`) is now rejected at
   construction by the new `ProtectedResourceMetadata.requireNoUserinfo(String)` gate, called from
   `AuthplaneClient.resource(...)`, the `AuthplaneResource` constructor and
@@ -84,8 +100,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheme-relative identifier failed. Rejecting at construction closes both. The derivation-time gate
   stays as a backstop and now names the requirement the identifier actually fails (no scheme, no
   authority, or opaque) instead of listing all of them. RFC 8707 §2 requires an absolute URI, which
-  RFC 3986 §4.3 defines as always carrying a scheme, so no valid identifier is turned away —
-  `urn:example:api` still constructs.
+  RFC 3986 §4.3 defines as always carrying a scheme, so an identifier that names a resource by
+  scheme is not turned away. Note the gate is scheme-only: an opaque identifier such as
+  `urn:example:api` still constructs here and fails later if a PRM URL is derived from it.
+  Whether construction is the right place to refuse an identifier with no host is a separate
+  question, not settled by this change, and tracked.
 
   **Migration:** A scheme-relative or relative resource identifier now fails at startup instead of
   at the first 401. Prefix the intended scheme. `wellKnownUrl` enforces the same four gates as the

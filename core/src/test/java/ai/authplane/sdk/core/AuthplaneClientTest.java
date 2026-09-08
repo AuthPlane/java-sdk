@@ -1136,14 +1136,6 @@ class AuthplaneClientTest {
     }
 
     /**
-     * Sets both refresh intervals to the same value.
-     *
-     * <p>Only the metadata one used to be set, which left the rebind backoff — computed from the
-     * JWKS interval — reading a knob the test never named. The two agreed at 60 only because both
-     * exceed the 30 s ceiling, so the tests below would have kept passing while measuring the wrong
-     * thing, and stopped agreeing at any interval under 30.
-     */
-    /**
      * The two call sites of {@code isInterrupt} see the same interrupt differently — {@code
      * refreshMetadataIfDue} gets it wrapped, because MetadataCache wraps anything that is not a
      * MetadataFetchException, while {@code rebindJwksIfMoved} gets it bare. Both must restore the
@@ -1182,13 +1174,27 @@ class AuthplaneClientTest {
         assertThat(a.getCause()).isSameAs(b);
         assertThat(AuthplaneClient.isInterrupt(a)).isFalse();
 
-        // And an interrupt reachable inside a cycle is still found, before the bound is hit.
-        RuntimeException d = new RuntimeException("d");
-        RuntimeException c = new RuntimeException("c", new InterruptedException());
-        d.initCause(c);
-        assertThat(AuthplaneClient.isInterrupt(d)).isTrue();
+        // An interrupt reachable *inside* a cycle is still found, before the bound is hit. The
+        // loop has to close through the interrupt itself for this to be a cycle at all: walking
+        // from `outer` reaches the InterruptedException on the third hop, and the fourth would
+        // return to `outer` if the walk kept going.
+        InterruptedException interrupt = new InterruptedException();
+        RuntimeException inner = new RuntimeException("inner", interrupt);
+        RuntimeException outer = new RuntimeException("outer", inner);
+        interrupt.initCause(outer);
+
+        assertThat(interrupt.getCause()).isSameAs(outer);
+        assertThat(AuthplaneClient.isInterrupt(outer)).isTrue();
     }
 
+    /**
+     * Sets both refresh intervals to the same value.
+     *
+     * <p>Only the metadata one used to be set, which left the rebind backoff — computed from the
+     * JWKS interval — reading a knob the test never named. The two agreed at 60 only because both
+     * exceed the 30 s ceiling, so the tests below would have kept passing while measuring the wrong
+     * thing, and stopped agreeing at any interval under 30.
+     */
     private AuthplaneClient buildClientWithClock(Clock clock, int refreshSeconds) throws Exception {
         return register(
                 AuthplaneClient.builder(baseUrl)

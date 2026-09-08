@@ -186,8 +186,10 @@ public final class ProtectedResourceMetadata {
         // the host and "the path and/or query components, if any"). Raw form, so the encoding is
         // exactly what the operator configured. An empty query (a bare trailing '?', for which
         // getRawQuery() returns "") is treated as absent: RFC 3986 would allow reading it as
-        // present-but-empty, but every implementation of this derivation settled on deriving the
-        // query-less URL, and cross-implementation parity wins over that reading.
+        // present-but-empty, but on *this* sub-case — an empty query — the family agrees on the
+        // query-less URL, and parity wins over that reading. It is only the empty-query reading
+        // that is settled: for a non-empty query the implementations still differ, which is
+        // tracked rather than asserted here.
         String query = uri.getRawQuery();
         return query == null || query.isEmpty() ? url : url + "?" + query;
     }

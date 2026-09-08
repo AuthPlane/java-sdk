@@ -241,7 +241,20 @@ public class DocumentCache {
     }
 
     private Map<String, Object> doForceRefresh(boolean ignoreFailureBackoff) throws Exception {
-        fetchLock.lock();
+        // tryLock, for the same reason {@link #get()} uses it: this is a request-path caller. The
+        // backoff above keeps a *failing* endpoint from costing a fetch per request, but it does
+        // nothing for the burst that arrives before the first failure records retryNotBefore —
+        // those would all queue on an exclusive lock for one HTTP timeout. A caller that finds a
+        // fetch already in flight is served the document currently held; the two methods now
+        // agree that no request-path caller blocks on another thread's fetch.
+        Map<String, Object> inFlight = cachedDocument;
+        if (inFlight != null && !fetchLock.tryLock()) {
+            LOG.fine(() -> documentType + " refresh in flight elsewhere; serving the current copy");
+            return inFlight;
+        }
+        if (inFlight == null) {
+            fetchLock.lock();
+        }
         try {
             long now = nowEpochSeconds();
             if (!ignoreFailureBackoff

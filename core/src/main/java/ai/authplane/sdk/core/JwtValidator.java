@@ -44,6 +44,10 @@ class JwtValidator {
      * Abstracts JWK key lookup by kid. Implemented by a lambda in AuthplaneResource that reads the
      * volatile jwksCache on each invocation.
      */
+    // Still @FunctionalInterface: a functional interface may declare default methods, and the
+    // annotation is what stops a second *abstract* one being added by accident. JwtValidatorTest
+    // passes a lambda.
+    @FunctionalInterface
     interface KeyLookup {
         Optional<Map<String, Object>> find(String kid, boolean forceRefresh) throws Exception;
 
