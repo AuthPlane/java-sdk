@@ -2,6 +2,7 @@ package ai.authplane.sdk.core.fetching;
 
 import java.time.Clock;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
@@ -106,13 +107,28 @@ public class DocumentCache {
             String documentType,
             BiConsumer<Map<String, Object>, Map<String, Object>> onChangeCallback,
             Clock clock) {
+        // Validated here, not only in AuthplaneClientBuilder. These constructors are public API on
+        // JwksCache and MetadataCache, so the builder's check does not cover a caller that builds a
+        // cache directly — and a non-positive interval reaches the same permanent-expiry state the
+        // server-expiry clamp was added for: effectiveTtlSeconds() returns it verbatim, age >= 0 on
+        // the first read, and every get() pays a synchronous fetch.
+        if (configuredRefreshSeconds <= 0) {
+            throw new IllegalArgumentException(
+                    "refresh interval must be positive, got "
+                            + configuredRefreshSeconds
+                            + ": a non-positive interval leaves the document permanently expired,"
+                            + " so every read would pay a synchronous fetch on the caller's"
+                            + " thread.");
+        }
+        // Checked at construction rather than surfacing as an NPE from the first get(), the same
+        // reasoning MetadataCache applies to expectedIssuer.
+        this.clock = Objects.requireNonNull(clock, "clock must not be null");
 
         this.fetcher = fetcher;
         this.url = url;
         this.configuredRefreshSeconds = configuredRefreshSeconds;
         this.documentType = documentType;
         this.onChangeCallback = onChangeCallback;
-        this.clock = clock;
     }
 
     /** Returns the URL this cache fetches from. */
@@ -370,8 +386,8 @@ public class DocumentCache {
      * The TTL actually in force: the configured interval, shortened by a server expiry when the
      * server asks for something sooner.
      *
-     * <p>A server expiry at or before the moment the document was cached is treated as **no
-     * preference** rather than as an expiry, and the configured interval governs. It has to be:
+     * <p>A server expiry at or before the moment the document was cached is treated as <em>no
+     * preference</em> rather than as an expiry, and the configured interval governs. It has to be:
      * {@code CacheHeaderParser.parseExpiresAt} returns {@code 0L} for {@code Cache-Control:
      * no-store} or {@code no-cache}, {@code now} for {@code max-age=0}, and a past epoch for a
      * stale {@code Expires:} — and subtracting {@code cachedAtEpochSeconds} from any of those

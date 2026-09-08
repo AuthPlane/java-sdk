@@ -9,8 +9,16 @@ import java.util.logging.Logger;
 /**
  * Parses RFC 7234 HTTP cache headers to determine a server-suggested expiry time.
  *
- * <p>The effective cache TTL used by DocumentCache is: effectiveTTL = min(configuredTTL,
- * serverExpiry) where serverExpiry is the value returned by this class.
+ * <p>A {@code null} return means the server expressed no cacheable preference, and the caller's
+ * configured interval governs. That is what {@code no-store} and {@code no-cache} return: they say
+ * the response should not be reused, which for a document this SDK must keep serving is not an
+ * expiry it can honour — the caller falls back to its own interval rather than treating the
+ * document as permanently stale. Both siblings model it the same way, as go's zero {@code
+ * time.Time} and ts's {@code undefined}.
+ *
+ * <p>A non-null return is an absolute expiry, and {@code DocumentCache} shortens its configured TTL
+ * to it when it is in the future. An expiry already in the past — a stale {@code Expires:}, or
+ * {@code max-age=0} — is discarded there for the same reason.
  *
  * <p>Thread-safe — all methods are stateless.
  */
@@ -25,16 +33,24 @@ public final class CacheHeaderParser {
      * provide cache directives.
      *
      * @param headers response headers with lower-cased header names
-     * @return Unix epoch seconds of expiry, 0 for no-store/no-cache, or null
+     * @return Unix epoch seconds of expiry, or {@code null} when the server expressed no usable
+     *     preference — no cache headers, an unparseable value, or {@code no-store}/{@code no-cache}
      */
     public static Long parseExpiresAt(Map<String, String> headers) {
         String cacheControl = headers.get("cache-control");
         if (cacheControl != null) {
             String cc = cacheControl.toLowerCase();
 
-            // no-store or no-cache → treat as immediately expired
+            // no-store / no-cache → no usable preference, not "expired now".
+            //
+            // These used to return 0L, which DocumentCache read as an absolute expiry at the
+            // epoch: subtracting the cache timestamp gave a TTL of about -1.7e9, the document was
+            // expired on every read, and every read paid a synchronous fetch. The cache now
+            // discards a non-future expiry, which made the 0L sentinel indistinguishable from
+            // null — it carried no information while the javadoc still claimed it meant
+            // "immediately expired". Returning null says the thing that is true.
             if (cc.contains("no-store") || cc.contains("no-cache")) {
-                return 0L;
+                return null;
             }
 
             // max-age=N

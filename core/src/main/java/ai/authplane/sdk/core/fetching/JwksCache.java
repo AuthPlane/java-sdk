@@ -36,6 +36,17 @@ public class JwksCache extends DocumentCache {
      * constructor package-private because {@code DocumentCache} is never constructed directly by a
      * caller outside this package.
      *
+     * <p><strong>The clock must not diverge from wall time by more than a cache TTL.</strong> A
+     * server {@code max-age} is turned into an absolute expiry against the system clock, in {@link
+     * CacheHeaderParser}, before it ever reaches this cache — and this cache compares it against a
+     * timestamp taken from the clock supplied here. Offset the two far apart and every real server
+     * expiry reads as already past, so server cache directives are discarded wholesale and the
+     * configured interval governs alone. That is a safe fallback rather than a failure, but it is
+     * silent. Advancing the clock forward from the real present, which is what a deterministic TTL
+     * test does, is fine: the offset only has to stay inside a TTL of wall time at the moment a
+     * document is fetched. Threading the clock into the header parser would remove the constraint
+     * and is tracked.
+     *
      * @param clock time source; pass {@link Clock#systemUTC()} unless driving TTL expiry
      *     deterministically
      */

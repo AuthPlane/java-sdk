@@ -137,6 +137,35 @@ class DocumentCacheTest {
     }
 
     /**
+     * A non-positive refresh interval reaches the same permanent-expiry state the server-expiry
+     * clamp was added for, through the other parameter. `AuthplaneClientBuilder` rejects it, but
+     * `JwksCache` and `MetadataCache` expose these constructors publicly, so the builder's check
+     * does not cover a caller that builds a cache directly.
+     */
+    @Test
+    void constructor_rejectsANonPositiveRefreshInterval() {
+        TestClock clock = new TestClock();
+        DocumentFetcher fetcher =
+                url -> CompletableFuture.completedFuture(new FetchResult(DOC_V1, null));
+
+        for (int interval : new int[] {0, -1}) {
+            assertThatThrownBy(() -> cacheWith(fetcher, interval, clock))
+                    .as("interval %s must be refused at construction", interval)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("must be positive");
+        }
+    }
+
+    @Test
+    void constructor_rejectsANullClock() {
+        DocumentFetcher fetcher =
+                url -> CompletableFuture.completedFuture(new FetchResult(DOC_V1, null));
+        assertThatThrownBy(() -> cacheWith(fetcher, 300, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("clock");
+    }
+
+    /**
      * A server expiry that is not in the future is no expiry at all.
      *
      * <p>`Cache-Control: no-store` and `no-cache` parse to `0L`, `max-age=0` to `now`, and a stale

@@ -82,6 +82,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `CacheHeaderParser.parseExpiresAt` returns `null` for `Cache-Control: no-store` and `no-cache`
+  instead of `0`. Those directives say the response should not be reused, which for a document
+  this SDK has to keep serving is not an expiry it can honour — so the honest answer is "no usable
+  preference", and the caller falls back to its configured interval. The `0` was read as an
+  absolute expiry at the epoch, which is what made the document permanently stale; once the cache
+  started discarding a non-future expiry the sentinel became indistinguishable from `null` while
+  the javadoc still claimed it meant "immediately expired". Both sibling SDKs already model this as
+  absent rather than as zero. A caller reading the return value directly should treat `null` as
+  "use your own interval"; nothing else in this SDK distinguished the two values.
+
 - `DocumentCache.forceRefresh()` now respects the failure backoff instead of fetching
   unconditionally, and returns the currently held document when a refresh is backing off or
   already in flight. This is a public method, inherited by the public `JwksCache` and
@@ -107,7 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A resource identifier without a scheme is now rejected at construction —
   `AuthplaneClient.resource(...)`, the `AuthplaneResource` constructor, and
   `ProtectedResourceMetadata.Builder#build()` all call the new
-  `ProtectedResourceMetadata.requireScheme(String)` gate. 0.1.0 refused such an identifier at
+  `ProtectedResourceMetadata.requireScheme(String)` gate. As shipped in 0.1.0 the SDK refused such an identifier at
   derivation, which covered the PRM URL but not the other sink that splices the scheme: the DPoP
   `htu` binding target read `null://api.example.com/mcp`, so every DPoP-bound request against a
   scheme-relative identifier failed. Rejecting at construction closes both. The derivation-time gate
