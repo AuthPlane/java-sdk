@@ -127,7 +127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheme is not turned away. Note the gate is scheme-only: an opaque identifier such as
   `urn:example:api` still constructs here and fails later if a PRM URL is derived from it.
   Whether construction is the right place to refuse an identifier with no host is a separate
-  question, not settled by this change, and tracked.
+  question, not settled by this change, and tracked in #31.
 
   **Migration:** A scheme-relative or relative resource identifier now fails at startup instead of
   at the first 401. Prefix the intended scheme. `wellKnownUrl` enforces the same four gates (in a

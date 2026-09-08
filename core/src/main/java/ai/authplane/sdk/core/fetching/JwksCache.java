@@ -45,7 +45,7 @@ public class JwksCache extends DocumentCache {
      * silent. Advancing the clock forward from the real present, which is what a deterministic TTL
      * test does, is fine: the offset only has to stay inside a TTL of wall time at the moment a
      * document is fetched. Threading the clock into the header parser would remove the constraint
-     * and is tracked.
+     * and is tracked in #34.
      *
      * @param clock time source; pass {@link Clock#systemUTC()} unless driving TTL expiry
      *     deterministically

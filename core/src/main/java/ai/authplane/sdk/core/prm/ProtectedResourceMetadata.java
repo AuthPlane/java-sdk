@@ -189,7 +189,7 @@ public final class ProtectedResourceMetadata {
         // present-but-empty, but on *this* sub-case — an empty query — the family agrees on the
         // query-less URL, and parity wins over that reading. It is only the empty-query reading
         // that is settled: for a non-empty query the implementations still differ, which is
-        // tracked rather than asserted here.
+        // tracked in #32 rather than asserted here.
         String query = uri.getRawQuery();
         return query == null || query.isEmpty() ? url : url + "?" + query;
     }
@@ -446,7 +446,7 @@ public final class ProtectedResourceMetadata {
      * construction sites run fragment, query, scheme, userinfo, while {@link #wellKnownUrl(String)}
      * runs fragment, scheme, userinfo, query. So an identifier that violates two of them can be
      * reported for a different component depending on the entrypoint. Both reject either way; only
-     * the message differs. Unifying the four behind one private gate is tracked.
+     * the message differs. Unifying the four behind one private gate is tracked in #33.
      *
      * @param resourceUri the resource identifier, as configured by the operator
      * @throws IllegalArgumentException if the identifier's authority carries a userinfo component
