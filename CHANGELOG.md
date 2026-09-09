@@ -82,6 +82,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** `nimbus-jose-jwt` moves from 9.40 to 10.9.1, closing GHSA-xwmg-2g98-w7v9 — a
+  denial of service on deeply nested JSON. 9.40 sits inside the vulnerable range
+  (`>= 9.38-rc1, < 10.0.2`), and 0.1.0 shipped with it. This library is what parses an
+  access token, on the verification path, before any signature is checked, so the input is
+  attacker-supplied and the caller does not need to be authenticated.
+
+  **Migration:** nimbus types are part of this SDK's public API — `DPoPKeyMaterial.fromJwk`
+  takes a `com.nimbusds.jose.jwk.JWK` and `publicJwk()` returns one. If you construct DPoP key
+  material yourself, or pin `nimbus-jose-jwt` in your own build, you need nimbus 10.x. If you
+  only use the SDK's own entrypoints, Maven resolves it transitively and there is nothing to do.
+  Pinning to the minimum fixed version (10.0.2) rather than the current one would not have
+  softened this: both are 10.x and impose the same major.
+
 - `CacheHeaderParser.parseExpiresAt` returns `null` for `Cache-Control: no-store` and `no-cache`
   instead of `0`. Those directives say the response should not be reused, which for a document
   this SDK has to keep serving is not an expiry it can honour — so the honest answer is "no usable
