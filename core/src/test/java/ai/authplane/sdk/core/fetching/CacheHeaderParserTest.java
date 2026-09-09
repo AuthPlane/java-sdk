@@ -31,30 +31,32 @@ class CacheHeaderParserTest {
     // Cache-Control: no-store / no-cache
     // -----------------------------------------------------------------------
 
+    // no-store / no-cache mean "no usable preference", reported as null — not an expiry at the
+    // epoch. The 0L these used to return was read by DocumentCache as an absolute expiry, which
+    // made the document permanently stale and cost a synchronous fetch on every read.
+
     @Test
-    void parseExpiresAt_noStore_returnsZero() {
-        Long result = CacheHeaderParser.parseExpiresAt(Map.of("cache-control", "no-store"));
-        assertThat(result).isEqualTo(0L);
+    void parseExpiresAt_noStore_returnsNull() {
+        assertThat(CacheHeaderParser.parseExpiresAt(Map.of("cache-control", "no-store"))).isNull();
     }
 
     @Test
-    void parseExpiresAt_noCache_returnsZero() {
-        Long result = CacheHeaderParser.parseExpiresAt(Map.of("cache-control", "no-cache"));
-        assertThat(result).isEqualTo(0L);
+    void parseExpiresAt_noCache_returnsNull() {
+        assertThat(CacheHeaderParser.parseExpiresAt(Map.of("cache-control", "no-cache"))).isNull();
     }
 
     @Test
-    void parseExpiresAt_noCacheUpperCase_returnsZero() {
-        Long result = CacheHeaderParser.parseExpiresAt(Map.of("cache-control", "NO-CACHE"));
-        assertThat(result).isEqualTo(0L);
+    void parseExpiresAt_noCacheUpperCase_returnsNull() {
+        assertThat(CacheHeaderParser.parseExpiresAt(Map.of("cache-control", "NO-CACHE"))).isNull();
     }
 
+    /** no-store wins over a max-age in the same header: it is the stronger directive. */
     @Test
-    void parseExpiresAt_noStoreWithOtherDirectives_returnsZero() {
-        Long result =
-                CacheHeaderParser.parseExpiresAt(
-                        Map.of("cache-control", "public, no-store, max-age=300"));
-        assertThat(result).isEqualTo(0L);
+    void parseExpiresAt_noStoreWithOtherDirectives_returnsNull() {
+        assertThat(
+                        CacheHeaderParser.parseExpiresAt(
+                                Map.of("cache-control", "public, no-store, max-age=300")))
+                .isNull();
     }
 
     // -----------------------------------------------------------------------

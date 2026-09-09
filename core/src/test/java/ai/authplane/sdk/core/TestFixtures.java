@@ -1,12 +1,16 @@
 package ai.authplane.sdk.core;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
@@ -319,6 +323,80 @@ public final class TestFixtures {
 
     public static TokenBuilder token() {
         return new TokenBuilder();
+    }
+
+    // -----------------------------------------------------------------------
+    // Client construction with a driven clock
+    // -----------------------------------------------------------------------
+
+    /**
+     * Builds a dev-mode client whose caches read time from {@code clock}, so cache TTL expiry can
+     * be driven by advancing the clock instead of sleeping against wall time.
+     *
+     * <p>Lives here because {@link AuthplaneClientBuilder#clock(Clock)} is package-private and this
+     * class shares its package. Everything else about the returned client is ordinary production
+     * configuration — tests built this way exercise the real request path, with no test-only
+     * trigger to reach the behaviour under test.
+     *
+     * @param issuer authorization server issuer identifier
+     * @param clock time source for the metadata and JWKS caches
+     * @param metadataRefreshSeconds metadata refresh interval to configure
+     */
+    public static AuthplaneClient clientWithClock(
+            String issuer, Clock clock, int metadataRefreshSeconds) throws Exception {
+        return AuthplaneClient.builder(issuer)
+                .devMode(true)
+                .metadataRefreshSeconds(metadataRefreshSeconds)
+                .clock(clock)
+                .build()
+                .get();
+    }
+
+    /**
+     * Clock advanced by hand, so a test states the elapsed time it wants instead of waiting for it.
+     */
+    public static final class AdvanceableClock extends Clock {
+
+        /** Arbitrary fixed start time; only the deltas from it matter. */
+        private static final long START_EPOCH_SECONDS = 1_700_000_000L;
+
+        private final AtomicLong nowSeconds;
+        private final ZoneId zone;
+
+        public AdvanceableClock() {
+            this(new AtomicLong(START_EPOCH_SECONDS), ZoneOffset.UTC);
+        }
+
+        private AdvanceableClock(AtomicLong nowSeconds, ZoneId zone) {
+            this.nowSeconds = nowSeconds;
+            this.zone = zone;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return zone;
+        }
+
+        /**
+         * Honours the requested zone, as {@link Clock} requires. Returning {@code this} regardless
+         * is harmless only until something composes this clock — {@code Clock.fixed} and {@code
+         * Clock.offset} both go through here — at which point the zone would be silently dropped.
+         * The returned view shares the same instant, so advancing either advances both.
+         */
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return zone.equals(this.zone) ? this : new AdvanceableClock(nowSeconds, zone);
+        }
+
+        @Override
+        public Instant instant() {
+            return Instant.ofEpochSecond(nowSeconds.get());
+        }
+
+        /** Moves the clock forward by the given number of seconds. */
+        public void advanceSeconds(long seconds) {
+            nowSeconds.addAndGet(seconds);
+        }
     }
 
     // -----------------------------------------------------------------------

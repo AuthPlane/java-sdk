@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 class ConformanceCatalogTest {
@@ -99,8 +100,38 @@ class ConformanceCatalogTest {
                 .isEmpty();
     }
 
+    @Test
+    void noneCoverageStubsMustCarryDisabled() throws Exception {
+        // A stub annotated @ConformanceCoverage(level = NONE) is honest only while @Disabled
+        // keeps it from running: drop the annotation without writing a body and the extension
+        // records status "passed" for a case with zero coverage — a green report entry that
+        // asserts nothing. This converts that coupling from a convention into a failure, using
+        // the same scan the alignment check trusts.
+        SuiteScan scan = scanConformanceSuites();
+        List<String> vacuous = new ArrayList<>();
+        for (Class<?> suite : scan.suiteClasses()) {
+            for (Method method : suite.getDeclaredMethods()) {
+                ConformanceCoverage coverage = method.getAnnotation(ConformanceCoverage.class);
+                if (coverage != null
+                        && coverage.level() == ConformanceCoverageLevel.NONE
+                        && !method.isAnnotationPresent(Disabled.class)) {
+                    vacuous.add(suite.getSimpleName() + "#" + method.getName());
+                }
+            }
+        }
+        assertThat(vacuous)
+                .withFailMessage(
+                        "%d test(s) declare @ConformanceCoverage(level = NONE) without @Disabled."
+                                + " Running such a stub reports the case as passed with zero"
+                                + " coverage. Either implement the case (and raise the coverage"
+                                + " level) or keep @Disabled attached:%n  - %s",
+                        vacuous.size(), String.join(NL + "  - ", vacuous))
+                .isEmpty();
+    }
+
     /** Case ids declared across the suite, plus whatever the scan could not read. */
-    private record SuiteScan(TreeSet<String> caseIds, List<String> loadFailures) {}
+    private record SuiteScan(
+            TreeSet<String> caseIds, List<String> loadFailures, List<Class<?>> suiteClasses) {}
 
     /**
      * Collects every {@link ConformanceCase} case id declared by a {@link ConformanceSuite} test
@@ -114,6 +145,7 @@ class ConformanceCatalogTest {
     private static SuiteScan scanConformanceSuites() throws Exception {
         TreeSet<String> ids = new TreeSet<>();
         List<String> loadFailures = new ArrayList<>();
+        List<Class<?>> suiteClasses = new ArrayList<>();
         String packageName = ConformanceCatalogTest.class.getPackageName();
         String packagePath = packageName.replace('.', '/');
         ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
@@ -145,6 +177,7 @@ class ConformanceCatalogTest {
                 if (!clazz.isAnnotationPresent(ConformanceSuite.class)) {
                     continue;
                 }
+                suiteClasses.add(clazz);
                 for (Method method : clazz.getDeclaredMethods()) {
                     ConformanceCase mapping = method.getAnnotation(ConformanceCase.class);
                     if (mapping != null) {
@@ -153,7 +186,7 @@ class ConformanceCatalogTest {
                 }
             }
         }
-        return new SuiteScan(ids, loadFailures);
+        return new SuiteScan(ids, loadFailures, suiteClasses);
     }
 
     /**

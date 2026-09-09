@@ -1,5 +1,6 @@
 package ai.authplane.sdk.core;
 
+import java.time.Clock;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -9,11 +10,14 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import ai.authplane.sdk.core.dpop.DPoPProvider;
 import ai.authplane.sdk.core.dpop.OutboundDPoPOptions;
 import ai.authplane.sdk.core.errors.TokenExchangeException;
+import ai.authplane.sdk.core.fetching.DocumentCache;
 import ai.authplane.sdk.core.fetching.DocumentFetcher;
 import ai.authplane.sdk.core.fetching.HttpTransport;
 import ai.authplane.sdk.core.fetching.JwksCache;
@@ -23,6 +27,7 @@ import ai.authplane.sdk.core.oauth.Introspection;
 import ai.authplane.sdk.core.oauth.IntrospectionResponse;
 import ai.authplane.sdk.core.oauth.Revocation;
 import ai.authplane.sdk.core.oauth.TokenExchange;
+import ai.authplane.sdk.core.prm.ProtectedResourceMetadata;
 
 /**
  * Central owner of Authorization Server connection state and token operations.
@@ -52,6 +57,9 @@ import ai.authplane.sdk.core.oauth.TokenExchange;
 @SuppressWarnings("checkstyle:FinalClass")
 public class AuthplaneClient implements AutoCloseable {
 
+    /** Depth bound for the cause walk in {@link #isInterrupt}; see the comment there. */
+    private static final int MAX_CAUSE_HOPS = 16;
+
     private static final Logger LOG = Logger.getLogger(AuthplaneClient.class.getName());
 
     /** Algorithms that must never be allowed. */
@@ -65,6 +73,45 @@ public class AuthplaneClient implements AutoCloseable {
     // Infrastructure
     volatile JwksCache jwksCache;
     final MetadataCache metadataCache; // null if metadata not available
+
+    /** Installed by the builder right after construction; null when there is no metadata cache. */
+    volatile JwksCacheFactory jwksCacheFactory;
+
+    private final ReentrantLock jwksRebindLock = new ReentrantLock();
+
+    /**
+     * Suppresses rebind attempts after one fails, on the same policy the caches use.
+     *
+     * <p>The factory builds a fresh {@link JwksCache} per attempt, so the backoff a cache keeps for
+     * itself starts from zero every time and cannot govern this. Without a backoff here, a rotated
+     * {@code jwks_uri} that is down costs a full HTTP timeout on the verification path for as long
+     * as the outage lasts — reconciling means the mismatch is re-detected on every key lookup, so
+     * every lookup pays. Tokens whose keys are already cached do not need that fetch to succeed;
+     * they only need it not to block them.
+     *
+     * <p>Volatile rather than lock-guarded: the fast path reads it before taking {@link
+     * #jwksRebindLock}, and a read that races a write costs at most one extra attempt.
+     */
+    private volatile long jwksRebindRetryNotBeforeEpochSeconds;
+
+    /**
+     * Time source for the rebind backoff. Replaced by the builder so tests can advance it.
+     *
+     * <p>{@code volatile} for the same reason {@code jwksCacheFactory} is: it is written after the
+     * constructor returns, so it carries none of the JMM final-field guarantees the other infra
+     * fields on this class get. A client published through a data race could otherwise hand a
+     * request thread {@code clock == null}, which NPEs in {@link #rebindJwksIfMoved}.
+     */
+    private volatile Clock clock = Clock.systemUTC();
+
+    /**
+     * Set by {@link AuthplaneClientBuilder} after construction, alongside {@code jwksCacheFactory},
+     * rather than as a thirteenth constructor parameter.
+     */
+    void setClock(Clock clock) {
+        this.clock = clock;
+    }
+
     final HttpTransport transport;
     final AuthProvider authProvider; // nullable
     final DocumentFetcher fetcher;
@@ -142,6 +189,18 @@ public class AuthplaneClient implements AutoCloseable {
         Objects.requireNonNull(options, "options must not be null");
         if (resourceUri.isBlank())
             throw new IllegalArgumentException("resourceUri must not be blank");
+        // RFC 8707 §2 / RFC 9728 §1.2: no fragment component. Redundant with the gate in the
+        // AuthplaneResource constructor, kept so the stack trace points at the caller's line.
+        ProtectedResourceMetadata.requireNoFragment(resourceUri);
+        // RFC 3986 §3.4: the query is now part of the identifier and is spliced into the
+        // WWW-Authenticate challenge, so an octet outside the query production must not get
+        // past construction. Same reason, same boundary.
+        ProtectedResourceMetadata.requireValidQuery(resourceUri);
+        // RFC 8707 §2: an absolute URI always carries a scheme. Same reason, same boundary.
+        ProtectedResourceMetadata.requireScheme(resourceUri);
+        // RFC 9110 §4.2.4: no userinfo. The identifier is published to unauthenticated callers
+        // verbatim, so a credential in the authority is disclosed. Same reason, same boundary.
+        ProtectedResourceMetadata.requireNoUserinfo(resourceUri);
 
         // Validate algorithms
         Set<String> dangerous = new HashSet<>(options.allowedAlgorithms());
@@ -412,12 +471,161 @@ public class AuthplaneClient implements AutoCloseable {
     // -----------------------------------------------------------------------
 
     /**
-     * Forces a synchronous metadata refresh, triggering the jwks_uri rotation callback if the
-     * metadata document has changed. Package-private — for use in tests only.
+     * Reads through the AS metadata cache and reconciles {@link #jwksCache} against the {@code
+     * jwks_uri} it advertises. This is what makes {@code metadataRefreshSeconds} effective on a
+     * resource server that only verifies tokens.
+     *
+     * <p>Such a server never calls the token, introspection or revocation endpoints, so nothing on
+     * its request path would otherwise touch the metadata document after start-up: the cache would
+     * hold the copy fetched at build time forever, and a rotated {@code jwks_uri} would never be
+     * followed. Verification calls this before every key lookup. The read is cheap while the
+     * document is fresh; once the interval has elapsed the cache re-fetches, and a rotation takes
+     * effect on the very lookup that discovered it.
+     *
+     * <p>The comparison is against the URI the cache is currently bound to, not against a change in
+     * the document, and that difference is the whole point. {@code DocumentCache} publishes a
+     * refreshed document before it notifies its change listener, so an edge-triggered rebind that
+     * failed — one 503 at the new URI — would leave key retrieval pinned to the withdrawn one with
+     * nothing left to re-trigger it: every later refresh returns that same document, so the edge
+     * never fires again. Comparing desired state to actual state instead means a failed rebind is
+     * simply retried on the next lookup.
+     *
+     * <p>Failures are swallowed deliberately. A metadata endpoint that is briefly unreachable must
+     * not fail verification of tokens whose signing keys the JWKS cache already holds; the cache
+     * falls back to the last good document, so this only logs when there is nothing to fall back
+     * on.
+     */
+    void refreshMetadataIfDue() {
+        if (metadataCache == null) {
+            return;
+        }
+        String discoveredJwksUri;
+        try {
+            discoveredJwksUri = metadataCache.getJwksUri();
+        } catch (InterruptedException e) {
+            // Shutdown, not a metadata problem. The flag is restored by DocumentCache; re-raising
+            // it here and returning keeps a stack trace out of the log on the way down.
+            Thread.currentThread().interrupt();
+            return;
+        } catch (Exception e) {
+            // The interrupt does not reach the branch above from this call site: MetadataCache
+            // wraps everything that is not a MetadataFetchException, so it arrives here wrapped.
+            // The flag is still restored upstream — only the logging would be wrong, and a stack
+            // trace on the way down is exactly what that branch exists to avoid. The sibling catch
+            // in rebindJwksIfMoved does see it unwrapped, since DocumentCache.fetch rethrows.
+            if (isInterrupt(e)) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            LOG.log(
+                    Level.WARNING,
+                    "AS metadata refresh failed; continuing with the current JWKS binding",
+                    e);
+            return;
+        }
+        rebindJwksIfMoved(discoveredJwksUri);
+    }
+
+    /**
+     * Whether a failure is an interrupt, however deeply it was wrapped on the way here.
+     *
+     * <p>Checking the thread's own flag would answer a different question: it stays set from an
+     * interrupt this call had nothing to do with, and would then silence a real metadata failure.
+     */
+    // Package-private rather than private: the wrapped/unwrapped asymmetry the two call sites
+    // rely on, and the cycle bound below, are both worth pinning directly.
+    static boolean isInterrupt(Throwable error) {
+        // Bounded rather than walked to the end. `initCause` refuses a self-reference, so the
+        // `t.getCause() == t` guard alone looks sufficient — but it does not stop a cycle built
+        // through the `Throwable(String, Throwable)` constructors, where A causes B causes A. That
+        // walk never terminates. No real chain approaches this depth.
+        int hops = 0;
+        for (Throwable t = error; t != null && hops < MAX_CAUSE_HOPS; t = t.getCause(), hops++) {
+            if (t instanceof InterruptedException) {
+                return true;
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Rebinds {@link #jwksCache} when the metadata document points key retrieval somewhere else.
+     * No-op when the two already agree, which is every call but the one that follows a rotation.
+     */
+    private void rebindJwksIfMoved(String discoveredJwksUri) {
+        if (jwksCacheFactory == null || discoveredJwksUri.equals(jwksCache.getUrl())) {
+            return;
+        }
+        long now = clock.instant().getEpochSecond();
+        if (now < jwksRebindRetryNotBeforeEpochSeconds) {
+            LOG.fine(
+                    () ->
+                            "jwks_uri rebind backing off after a failed attempt (retry in "
+                                    + (jwksRebindRetryNotBeforeEpochSeconds - now)
+                                    + "s); keeping the current binding");
+            return;
+        }
+        // One rebind at a time. A caller that loses the race keeps the current binding for this
+        // lookup rather than queueing behind a JWKS fetch; the winner publishes for everyone, and
+        // a kid miss forces a refresh anyway.
+        if (!jwksRebindLock.tryLock()) {
+            return;
+        }
+        try {
+            String boundUri = jwksCache.getUrl();
+            if (discoveredJwksUri.equals(boundUri)) {
+                return; // another thread got there first
+            }
+            LOG.warning(
+                    "jwks_uri changed from '"
+                            + boundUri
+                            + "' to '"
+                            + discoveredJwksUri
+                            + "', restarting JWKS cache");
+            jwksCache = jwksCacheFactory.create(discoveredJwksUri);
+            jwksRebindRetryNotBeforeEpochSeconds = 0;
+            LOG.info(() -> "JWKS cache restarted with new URI: " + discoveredJwksUri);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            long backoff = DocumentCache.failureBackoffSeconds(jwksRefreshSeconds);
+            jwksRebindRetryNotBeforeEpochSeconds = clock.instant().getEpochSecond() + backoff;
+            LOG.log(
+                    Level.WARNING,
+                    "Failed to initialise new JWKS cache for URI: "
+                            + discoveredJwksUri
+                            + ". Keeping the existing cache; retrying in "
+                            + backoff
+                            + "s.",
+                    e);
+        } finally {
+            jwksRebindLock.unlock();
+        }
+    }
+
+    /**
+     * Builds a JWKS cache bound to a newly discovered {@code jwks_uri}, already populated. Supplied
+     * by {@link AuthplaneClientBuilder}, which owns the fetcher, the refresh interval and the time
+     * source a new cache needs.
+     */
+    @FunctionalInterface
+    interface JwksCacheFactory {
+        JwksCache create(String jwksUri) throws Exception;
+    }
+
+    /**
+     * Forces a synchronous metadata refresh, bypassing the configured interval. The JWKS binding is
+     * not touched here — it is reconciled by the next {@link #refreshMetadataIfDue()}, which is
+     * what every key lookup calls. Package-private — for use in tests only.
      */
     void forceMetadataRefreshForTest() throws Exception {
         if (metadataCache != null) {
-            metadataCache.forceRefresh();
+            // Bypasses the failure backoff: a test asking for a refresh wants the attempt made, not
+            // the cached copy handed back. The request-path callers deliberately do not.
+            metadataCache.forceRefreshIgnoringFailureBackoff();
         }
     }
 

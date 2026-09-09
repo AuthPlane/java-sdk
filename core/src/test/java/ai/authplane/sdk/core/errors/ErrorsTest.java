@@ -306,6 +306,23 @@ class ErrorsTest {
     }
 
     @Test
+    void wwwAuthenticate_resourceMetadataWithQuery_isCarriedVerbatim() {
+        // prmUrl() carries the resource identifier's query into the PRM URL (RFC 9728 §3). The
+        // sanitiser must pass '?', '&' and '=' through untouched: they are legal inside an HTTP
+        // quoted-string, and only control characters, '"' and '\' are rewritten.
+        var ex = new TokenExpiredException("expired");
+        String header =
+                WwwAuthenticate.of(
+                        ex,
+                        WwwAuthenticate.ChallengeOptions.empty()
+                                .withResourceMetadataUrl(
+                                        "https://api.example.com/.well-known/oauth-protected-resource/mcp?tenant=a&x=1"));
+        assertThat(header)
+                .contains(
+                        "resource_metadata=\"https://api.example.com/.well-known/oauth-protected-resource/mcp?tenant=a&x=1\"");
+    }
+
+    @Test
     void wwwAuthenticate_challengeOptions_nullArgs_throw() {
         assertThat(WwwAuthenticate.ChallengeOptions.empty().scope()).isEmpty();
         org.assertj.core.api.Assertions.assertThatThrownBy(

@@ -314,6 +314,25 @@ class AuthplaneResourceTest {
     }
 
     @Test
+    void prmUrl_resourceWithQuery_preservesQuery() throws Exception {
+        // The query is part of the resource identifier; RFC 9728 §3 places the well-known
+        // string between the host and "the path and/or query components, if any", so the
+        // challenge's resource_metadata URL carries the query through.
+        resource = createResource("https://api.example.com/mcp?tenant=a");
+        assertThat(resource.prmUrl())
+                .isEqualTo(
+                        "https://api.example.com/.well-known/oauth-protected-resource/mcp?tenant=a");
+    }
+
+    @Test
+    void prmPath_resourceWithQuery_staysPathKeyed() throws Exception {
+        // Routing is path-keyed: the query appears only in prmUrl(). The single route serves
+        // the document for every query value.
+        resource = createResource("https://api.example.com/mcp?tenant=a");
+        assertThat(resource.prmPath()).isEqualTo("/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
     void normalizeRequestUrl_substitutesResourceHost_keepsRequestPath() throws Exception {
         resource = createResource("https://api.example.com/mcp");
         // The request arrives on an internal/proxy host; htu must use the canonical resource host
@@ -328,6 +347,18 @@ class AuthplaneResourceTest {
         // Request to a sub-path of the resource binds htu to the full target URL.
         assertThat(resource.normalizeRequestUrl("http://internal-host/mcp1/tool"))
                 .isEqualTo("https://my.mcp.org/mcp1/tool");
+    }
+
+    @Test
+    void normalizeRequestUrl_preservesTheRawAuthority() throws Exception {
+        // Same rule the PRM derivation follows: getAuthority() percent-decodes, so an escape in
+        // the authority used to produce an htu naming the decoded form — an authority
+        // structurally different from the one the identifier names, which the client's proof
+        // never matches. The escape sits in the registered name (RFC 3986 §3.2.2), not in
+        // userinfo: userinfo no longer constructs at all.
+        resource = createResource("https://a%2Db.example.com/mcp");
+        assertThat(resource.normalizeRequestUrl("http://10.0.0.5:8080/mcp"))
+                .isEqualTo("https://a%2Db.example.com/mcp");
     }
 
     @Test

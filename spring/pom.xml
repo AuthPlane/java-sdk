@@ -12,6 +12,16 @@
     <relativePath>../pom.xml</relativePath>
   </parent>
 
+  <properties>
+    <!--
+      One version for the Spring artifacts this module compiles and tests against.
+      spring-test ships MockHttpServletRequest/Response, which the PRM RouterFunction test drives:
+      it has to move with spring-webmvc, and two literals side by side drift the moment one is
+      bumped alone.
+    -->
+    <spring.version>7.0.8</spring.version>
+  </properties>
+
   <artifactId>authplane-spring</artifactId>
   <packaging>jar</packaging>
 
@@ -65,7 +75,7 @@
     <dependency>
       <groupId>org.springframework</groupId>
       <artifactId>spring-webmvc</artifactId>
-      <version>7.0.8</version>
+      <version>${spring.version}</version>
       <scope>provided</scope>
     </dependency>
 
@@ -132,6 +142,17 @@
     <dependency>
       <groupId>io.modelcontextprotocol.sdk</groupId>
       <artifactId>mcp-json-jackson3</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Spring test fixtures (MockHttpServletRequest/Response) — used to drive the PRM
+      RouterFunction with a real request. Pinned to ${spring.version} with spring-webmvc.
+    -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-test</artifactId>
+      <version>${spring.version}</version>
       <scope>test</scope>
     </dependency>
   </dependencies>

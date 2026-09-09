@@ -94,6 +94,8 @@ Every builder method on `AuthplaneMcpSetup.Builder`:
 | `outboundDPoP(OutboundDPoPOptions)` | `null` | Enables outbound DPoP proofs on AS calls |
 | `inboundDPoP(InboundDPoPOptions)` | `null` | Enables inbound DPoP proof validation |
 
+Both refresh intervals are driven by traffic rather than by a background timer: the first token verification past the interval pays for the refetch. That is what keeps an MCP server — which never calls the token, introspection or revocation endpoints — following a rotated `jwks_uri`: the metadata read that discovers the new URI rebinds JWKS fetching before the token is verified. A metadata endpoint that is unreachable does not fail verification; the last known good document keeps being served.
+
 ## 5. Scope enforcement
 
 Enforce per-tool scope requirements inside tool handlers:

@@ -51,7 +51,19 @@
       <artifactId>mcp-json-jackson3</artifactId>
     </dependency>
 
-    <!-- Embedded Jetty — only needed to run MathServer example standalone -->
+    <!--
+      Embedded Jetty. Two uses, both of which have to survive any edit to this entry:
+
+        - running the MathServer example standalone;
+        - PrmServletTest, which drives the PRM servlet through a real container.
+
+      It stays a single compile-scope declaration. `optional` governs what reaches consumers,
+      not this module, so the test classpath already has it; a second test-scope declaration of
+      the same coordinates does not add one — Maven keeps the last and would strip jakarta.servlet
+      from the compile classpath. What was actually missing was this comment: it said "only needed
+      to run MathServer example standalone", which invites deleting the entry and taking a test
+      suite down with it.
+    -->
     <dependency>
       <groupId>org.eclipse.jetty.ee10</groupId>
       <artifactId>jetty-ee10-servlet</artifactId>

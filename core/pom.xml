@@ -24,10 +24,17 @@
 
   <dependencies>
     <!-- JWT/JWK crypto — the only production dependency -->
+    <!--
+      10.x is required by GHSA-xwmg-2g98-w7v9: 9.40 sits inside the vulnerable range
+      (>= 9.38-rc1, < 10.0.2) — a DoS on deeply nested JSON. This library parses
+      attacker-supplied JWTs on the verification path, before any signature is checked.
+      Kept current rather than pinned to the minimum 10.0.2: both impose the same major
+      on consumers, and nimbus types are part of this SDK's public API.
+    -->
     <dependency>
       <groupId>com.nimbusds</groupId>
       <artifactId>nimbus-jose-jwt</artifactId>
-      <version>9.40</version>
+      <version>10.9.1</version>
     </dependency>
 
     <!-- Test dependencies — version and scope managed in the parent pom -->

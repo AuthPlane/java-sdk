@@ -44,9 +44,20 @@ class JwtValidator {
      * Abstracts JWK key lookup by kid. Implemented by a lambda in AuthplaneResource that reads the
      * volatile jwksCache on each invocation.
      */
+    // Still @FunctionalInterface: a functional interface may declare default methods, and the
+    // annotation is what stops a second *abstract* one being added by accident. JwtValidatorTest
+    // passes a lambda.
     @FunctionalInterface
     interface KeyLookup {
         Optional<Map<String, Object>> find(String kid, boolean forceRefresh) throws Exception;
+
+        /**
+         * Called once per verification, before any {@link #find} call. This is where the metadata
+         * document is re-read and the JWKS binding reconciled against it, so a rotated {@code
+         * jwks_uri} is in effect for the lookups below. Hoisted out of {@code find} because a kid
+         * miss calls that twice and the reconcile is not wanted twice.
+         */
+        default void beforeLookup() {}
     }
 
     private final String issuer;
@@ -113,7 +124,9 @@ class JwtValidator {
         String kid = validateHeader(header);
         String alg = getRequiredStringClaim(header, "alg", true);
 
-        // Step 5: JWKS key lookup
+        // Step 5: JWKS key lookup. Reconcile the binding first, once, so both the cached lookup
+        // and the forced refresh below run against the currently bound jwks_uri.
+        keyLookup.beforeLookup();
         Optional<Map<String, Object>> keyOpt = keyLookup.find(kid, false);
         if (keyOpt.isEmpty()) {
             LOG.info(() -> "kid '" + kid + "' not in JWKS cache, forcing refresh");

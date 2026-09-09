@@ -10,11 +10,14 @@ import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 class DocumentCacheTest {
 
@@ -133,6 +136,103 @@ class DocumentCacheTest {
         assertThat(fetchCount.get()).isEqualTo(2);
     }
 
+    /**
+     * A non-positive refresh interval reaches the same permanent-expiry state the server-expiry
+     * clamp was added for, through the other parameter. `AuthplaneClientBuilder` rejects it, but
+     * `JwksCache` and `MetadataCache` expose these constructors publicly, so the builder's check
+     * does not cover a caller that builds a cache directly.
+     */
+    @Test
+    void constructor_rejectsANonPositiveRefreshInterval() {
+        TestClock clock = new TestClock();
+        DocumentFetcher fetcher =
+                url -> CompletableFuture.completedFuture(new FetchResult(DOC_V1, null));
+
+        for (int interval : new int[] {0, -1}) {
+            assertThatThrownBy(() -> cacheWith(fetcher, interval, clock))
+                    .as("interval %s must be refused at construction", interval)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("must be positive");
+        }
+    }
+
+    @Test
+    void constructor_rejectsANullClock() {
+        DocumentFetcher fetcher =
+                url -> CompletableFuture.completedFuture(new FetchResult(DOC_V1, null));
+        assertThatThrownBy(() -> cacheWith(fetcher, 300, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("clock");
+    }
+
+    /**
+     * A server expiry that is not in the future is no expiry at all.
+     *
+     * <p>`Cache-Control: no-store` and `no-cache` parse to `0L`, `max-age=0` to `now`, and a stale
+     * `Expires:` to a past epoch. Subtracting the cache timestamp from any of those gives a
+     * negative TTL, which makes the document permanently expired: every read takes the synchronous
+     * re-fetch branch, on the caller's thread. The failure backoff cannot help, because a
+     * `no-store` endpoint that *answers* clears it and re-arms the expiry on the same call.
+     *
+     * <p>This matters now that verification reads through the metadata cache on every key lookup —
+     * and does so before signature verification, so an unauthenticated caller would set the fetch
+     * rate against the authorization server.
+     */
+    @Test
+    void get_serverExpiryNotInTheFuture_fallsBackToTheConfiguredInterval() throws Exception {
+        // 0L is what no-store and no-cache parse to; -1 stands for a stale Expires: header.
+        for (long serverExpiry : new long[] {0L, -1L}) {
+            AtomicInteger fetchCount = new AtomicInteger();
+            TestClock clock = new TestClock();
+            DocumentFetcher fetcher =
+                    url -> {
+                        fetchCount.incrementAndGet();
+                        return CompletableFuture.completedFuture(
+                                new FetchResult(DOC_V1, serverExpiry));
+                    };
+            cache = cacheWith(fetcher, 300, clock);
+            cache.fetch();
+            assertThat(fetchCount.get()).isEqualTo(1);
+
+            for (int i = 0; i < 5; i++) {
+                assertThat(cache.get()).isEqualTo(DOC_V1);
+            }
+            assertThat(fetchCount.get())
+                    .as(
+                            "server expiry %s must not make the document permanently expired",
+                            serverExpiry)
+                    .isEqualTo(1);
+
+            clock.advanceSeconds(301);
+            cache.get();
+            assertThat(fetchCount.get())
+                    .as("the configured interval still governs for server expiry %s", serverExpiry)
+                    .isEqualTo(2);
+        }
+    }
+
+    /**
+     * A server expiry exactly at the cache timestamp is the max-age=0 case, and behaves the same.
+     */
+    @Test
+    void get_serverExpiryEqualToCachedAt_fallsBackToTheConfiguredInterval() throws Exception {
+        AtomicInteger fetchCount = new AtomicInteger();
+        TestClock clock = new TestClock();
+        DocumentFetcher fetcher =
+                url -> {
+                    fetchCount.incrementAndGet();
+                    return CompletableFuture.completedFuture(
+                            new FetchResult(DOC_V1, clock.instant().getEpochSecond()));
+                };
+        cache = cacheWith(fetcher, 300, clock);
+        cache.fetch();
+
+        for (int i = 0; i < 5; i++) {
+            cache.get();
+        }
+        assertThat(fetchCount.get()).as("max-age=0 must not cost a fetch per read").isEqualTo(1);
+    }
+
     @Test
     void get_serverExpiresTtl_usesMinOfConfiguredAndServer() throws Exception {
         // Server says the document expires 10s from now; the configured TTL is 300s. The
@@ -194,6 +294,68 @@ class DocumentCacheTest {
         void advanceSeconds(long seconds) {
             nowSeconds.addAndGet(seconds);
         }
+    }
+
+    // A regression here blocks rather than returning the wrong value, and in CI a hang is not
+    // the same as a failure: it burns the job's wall clock and surfaces as a build timeout
+    // instead of a named test. The bound turns it back into a failure that says what broke.
+    @Test
+    @Timeout(10)
+    void get_whileARefreshIsInFlight_servesTheCurrentCopyInsteadOfQueueing() throws Exception {
+        // The lock-free read is a semantic change to a public method, not a performance tweak:
+        // once a refresh is in flight, get() returns the published document without honouring
+        // expiry. That is deliberate — on the verification path the alternative is every caller
+        // queueing behind one network round trip — but it is only exercised when fetchLock is
+        // actually contended, which no single-threaded test does.
+        CountDownLatch fetchStarted = new CountDownLatch(1);
+        CountDownLatch releaseFetch = new CountDownLatch(1);
+        AtomicInteger fetchCount = new AtomicInteger();
+        TestClock clock = new TestClock();
+        DocumentFetcher fetcher =
+                url ->
+                        CompletableFuture.supplyAsync(
+                                () -> {
+                                    if (fetchCount.incrementAndGet() > 1) {
+                                        fetchStarted.countDown();
+                                        try {
+                                            releaseFetch.await();
+                                        } catch (InterruptedException e) {
+                                            Thread.currentThread().interrupt();
+                                            throw new CompletionException(e);
+                                        }
+                                        return new FetchResult(DOC_V2, null);
+                                    }
+                                    return new FetchResult(DOC_V1, null);
+                                });
+        cache = cacheWith(fetcher, 100, clock);
+        cache.fetch();
+
+        clock.advanceSeconds(101); // expired, so the refresher below takes the synchronous branch
+
+        Thread refresher =
+                new Thread(
+                        () -> {
+                            try {
+                                cache.get();
+                            } catch (Exception e) {
+                                throw new IllegalStateException(e);
+                            }
+                        });
+        refresher.start();
+        assertThat(fetchStarted.await(5, TimeUnit.SECONDS))
+                .as("the refresh reached the fetcher and is holding fetchLock")
+                .isTrue();
+
+        // Returns while the refresh is still blocked — asserted by ordering rather than by a
+        // timeout: releaseFetch has not been counted down yet, so a get() that queued behind the
+        // lock could not have returned at all.
+        assertThat(cache.get()).isEqualTo(DOC_V1);
+        assertThat(fetchCount.get()).as("no second fetch was started").isEqualTo(2);
+
+        releaseFetch.countDown();
+        refresher.join(5_000);
+        assertThat(refresher.isAlive()).isFalse();
+        assertThat(cache.get()).isEqualTo(DOC_V2);
     }
 
     private static DocumentCache cacheWith(DocumentFetcher fetcher, int ttl) {

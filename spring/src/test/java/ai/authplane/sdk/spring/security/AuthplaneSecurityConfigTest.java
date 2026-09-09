@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
 
@@ -23,6 +24,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.support.GenericApplicationContext;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.security.config.ObjectPostProcessor;
 import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -30,6 +35,10 @@ import org.springframework.security.oauth2.server.resource.web.authentication.Be
 import org.springframework.security.web.DefaultSecurityFilterChain;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
+import org.springframework.web.servlet.function.HandlerFunction;
+import org.springframework.web.servlet.function.RouterFunction;
+import org.springframework.web.servlet.function.ServerRequest;
+import org.springframework.web.servlet.function.ServerResponse;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
@@ -176,6 +185,107 @@ class AuthplaneSecurityConfigTest {
         AuthplaneResource v = buildVerifier(client, false);
         var router = config.authplanePrmEndpoint(v);
         assertThat(router).isNotNull();
+    }
+
+    @Test
+    void authplanePrmEndpoint_queryBearingRequest_resolvesToHandlerAndServesDocument()
+            throws Exception {
+        // The advertised PRM URL may carry the resource identifier's query component while the
+        // route is registered path-keyed. This drives the RouterFunction with a query-bearing
+        // request rather than asserting registration: the request must resolve to the handler and
+        // be served the document.
+        AuthplaneResource v = buildVerifier(buildClient(0), false);
+        RouterFunction<ServerResponse> router = config.authplanePrmEndpoint(v);
+
+        MockHttpServletRequest servletRequest = new MockHttpServletRequest("GET", v.prmPath());
+        servletRequest.setQueryString("tenant=a");
+        servletRequest.addParameter("tenant", "a");
+        List<HttpMessageConverter<?>> converters = List.of(new JacksonJsonHttpMessageConverter());
+        ServerRequest request = ServerRequest.create(servletRequest, converters);
+
+        Optional<HandlerFunction<ServerResponse>> handler = router.route(request);
+        assertThat(handler).isPresent();
+
+        ServerResponse serverResponse = handler.get().handle(request);
+        MockHttpServletResponse servletResponse = new MockHttpServletResponse();
+        serverResponse.writeTo(servletRequest, servletResponse, () -> converters);
+
+        assertThat(servletResponse.getStatus()).isEqualTo(200);
+        assertThat(servletResponse.getContentAsString())
+                .contains("\"resource\":\"" + baseUrl + "/mcp\"");
+    }
+
+    @Test
+    void authenticationEntryPoint_queryBearingResource_advertisesTheQueryInTheChallenge()
+            throws Exception {
+        // The one end-to-end link the query axis left unasserted: a resource whose *identifier*
+        // carries a query, through the real prmUrl(), into the resource_metadata parameter of a
+        // real 401. The entry-point test mocks prmUrl(); ErrorsTest hand-feeds an already-derived
+        // URL to the sanitiser; and the routing test above uses a query-less resource with a
+        // query-bearing request, so the spring side never saw a query-bearing identifier at all.
+        AuthplaneResource v =
+                config.authplaneResource(
+                        buildClient(0),
+                        baseUrl + "/mcp?tenant=a",
+                        List.of("tools/add"),
+                        List.of("RS256"),
+                        30,
+                        false,
+                        revocationCheckerProvider,
+                        inboundDPoPProvider);
+
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        new AuthplaneAuthenticationEntryPoint(v)
+                .commence(new MockHttpServletRequest("GET", "/mcp"), response, null);
+
+        assertThat(response.getStatus()).isEqualTo(401);
+        assertThat(response.getHeader("WWW-Authenticate"))
+                .contains(
+                        "resource_metadata=\""
+                                + baseUrl
+                                + "/.well-known/oauth-protected-resource/mcp?tenant=a\"");
+    }
+
+    @Test
+    void authplaneResource_queryOutsideTheRfc3986Grammar_failsAtContextStartup() {
+        // A query octet the §3.4 grammar does not admit used to construct cleanly and then throw
+        // out of prmUrl() inside commence() — a 500 in place of the 401. It now fails where the
+        // operator wrote it, which for a Spring host is context startup.
+        assertThatThrownBy(
+                        () ->
+                                config.authplaneResource(
+                                        buildClient(0),
+                                        baseUrl + "/mcp?a=b c",
+                                        List.of("tools/add"),
+                                        List.of("RS256"),
+                                        30,
+                                        false,
+                                        revocationCheckerProvider,
+                                        inboundDPoPProvider))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("RFC 3986 §3.4");
+    }
+
+    @Test
+    void authplaneResource_schemeRelativeIdentifier_failsAtContextStartup() {
+        // A scheme-relative identifier used to construct cleanly and fail only at the sinks that
+        // splice the scheme — the PRM derivation inside commence() and the DPoP htu binding
+        // target, both reading the missing scheme as the literal text "null". Like the invalid
+        // query above, it now fails where the operator wrote it: context startup for a Spring
+        // host.
+        assertThatThrownBy(
+                        () ->
+                                config.authplaneResource(
+                                        buildClient(0),
+                                        "//api.example.com/mcp",
+                                        List.of("tools/add"),
+                                        List.of("RS256"),
+                                        30,
+                                        false,
+                                        revocationCheckerProvider,
+                                        inboundDPoPProvider))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("has no scheme");
     }
 
     @Test
@@ -336,6 +446,29 @@ class AuthplaneSecurityConfigTest {
         assertThatThrownBy(() -> config.authplaneSecurityFilterChain(null, rootResource))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("must include a path");
+    }
+
+    @Test
+    void authplaneResource_fragmentInProperty_throwsIllegalArgument() throws Exception {
+        // authplane.resource is operator-supplied, and this bean is the only place a Spring host
+        // constructs the resource. A fragment must fail at context startup, not silently publish a
+        // PRM document whose "resource" disagrees with the URL it is served from (RFC 8707 §2,
+        // RFC 9728 §1.2/§3.3).
+        AuthplaneClient client = buildClient(0);
+
+        assertThatThrownBy(
+                        () ->
+                                config.authplaneResource(
+                                        client,
+                                        baseUrl + "/mcp#section",
+                                        List.of("tools/add"),
+                                        List.of("RS256"),
+                                        30,
+                                        false,
+                                        revocationCheckerProvider,
+                                        inboundDPoPProvider))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not include a fragment component");
     }
 
     // -----------------------------------------------------------------------

@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -64,6 +65,18 @@ public class AuthplaneResource {
             String resourceUri,
             List<String> scopes,
             ResourceOptions options) {
+        // Authoritative fragment gate: every AuthplaneResource is built here, so an identifier
+        // carrying a fragment cannot reach prmResponse(), which publishes it verbatim.
+        ProtectedResourceMetadata.requireNoFragment(resourceUri);
+        ProtectedResourceMetadata.requireValidQuery(resourceUri);
+        // Authoritative scheme gate: the scheme feeds more than the PRM derivation — it is
+        // spliced into the DPoP htu binding target in normalizeRequestUrl below, where a missing
+        // one reads as the literal text "null" and fails every DPoP-bound request.
+        ProtectedResourceMetadata.requireScheme(resourceUri);
+        // Authoritative userinfo gate: the identifier is published verbatim as the PRM `resource`
+        // member and in the resource_metadata parameter of the 401 challenge, both of which reach
+        // unauthenticated callers, so a credential in the authority must not get this far.
+        ProtectedResourceMetadata.requireNoUserinfo(resourceUri);
         this.client = client;
         this.resourceUri = resourceUri;
         this.scopes = List.copyOf(scopes);
@@ -80,14 +93,29 @@ public class AuthplaneResource {
         this.failClosed = options.failClosed();
         this.inboundDPoP = options.inboundDPoP();
 
-        // KeyLookup reads through the client's JWKS cache
+        // KeyLookup reads through the client's JWKS cache, after giving the metadata cache the
+        // chance to re-read: verification is the only traffic a verify-only resource server has,
+        // so this is what keeps metadataRefreshSeconds honoured and follows a rotated jwks_uri.
+        // The rebind happens before the volatile jwksCache field is read below, so a rotation
+        // takes effect on the very lookup that discovered it.
         this.validator =
                 new JwtValidator(
                         client.issuer(),
                         resourceUri,
                         this.allowedAlgorithms,
                         options.clockSkewSeconds(),
-                        (kid, force) -> client.jwksCache.getKeyByKid(kid, force));
+                        new JwtValidator.KeyLookup() {
+                            @Override
+                            public void beforeLookup() {
+                                client.refreshMetadataIfDue();
+                            }
+
+                            @Override
+                            public Optional<Map<String, Object>> find(String kid, boolean force)
+                                    throws Exception {
+                                return client.jwksCache.getKeyByKid(kid, force);
+                            }
+                        });
     }
 
     // -----------------------------------------------------------------------
@@ -312,6 +340,13 @@ public class AuthplaneResource {
      * Returns the URL path at which this resource's RFC 9728 Protected Resource Metadata document
      * should be served (e.g. {@code /.well-known/oauth-protected-resource}, or a path-qualified
      * variant when the resource URI has a path).
+     *
+     * <p>Routing is path-keyed: a query component of the resource URI never appears here — it is
+     * carried in {@link #prmUrl()}. Identifiers differing only by query therefore share one route
+     * serving one document. Serving distinct documents per query value is not supported: RFC 9728
+     * §3.3 requires a client to discard a response whose {@code resource} member differs from the
+     * identifier it derived the request from, so any query value the shared document's {@code
+     * resource} was not built for fails that client-side check.
      */
     public String prmPath() {
         return ProtectedResourceMetadata.wellKnownPath(URI.create(resourceUri));
@@ -320,6 +355,11 @@ public class AuthplaneResource {
     /**
      * Returns the absolute URL of this resource's RFC 9728 Protected Resource Metadata document,
      * suitable for the {@code resource_metadata} parameter of a {@code WWW-Authenticate} challenge.
+     *
+     * <p>A query component of the resource URI is preserved in the returned URL (RFC 9728 §3
+     * inserts the well-known string between the host and "the path and/or query components, if
+     * any"), so a challenge for {@code https://api.example.com/mcp?tenant=a} advertises {@code
+     * .../.well-known/oauth-protected-resource/mcp?tenant=a}.
      *
      * <p><strong>Not header-safe.</strong> The value is derived from the operator-configured
      * resource URI and is returned verbatim — it is NOT escaped for use in an HTTP header. When
@@ -362,7 +402,19 @@ public class AuthplaneResource {
     public String normalizeRequestUrl(String requestUrl) {
         URI base = URI.create(resourceUri);
         String path = URI.create(requestUrl).getRawPath();
-        return base.getScheme() + "://" + base.getAuthority() + (path == null ? "" : path);
+        // getRawAuthority(), for the same reason the PRM derivation reads it raw: getAuthority()
+        // percent-decodes, so an identifier whose authority carries a percent-escape would yield an
+        // htu naming the decoded form — structurally different from the one the identifier names,
+        // which the client's proof can never match.
+        //
+        // The escape has to be of a *reserved* octet for raw to be the right answer. RFC 3986
+        // §6.2.2.2 requires percent-encoded *unreserved* octets to be decoded before comparison, so
+        // a conformant client normalizes "https://a%2Db.example.com" (%2D is "-") to
+        // "https://a-b.example.com" and sends that — the raw form would fail to match it. The case
+        // this preserves is "https://a%3Ab.example.com", where %3A is ":" and decoding it would
+        // change where the authority ends. Userinfo is rejected at construction now, but the escape
+        // is not confined to userinfo: a registered name may carry one too (RFC 3986 §3.2.2).
+        return base.getScheme() + "://" + base.getRawAuthority() + (path == null ? "" : path);
     }
 
     // -----------------------------------------------------------------------

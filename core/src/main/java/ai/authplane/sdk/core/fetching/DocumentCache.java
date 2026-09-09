@@ -2,6 +2,7 @@ package ai.authplane.sdk.core.fetching;
 
 import java.time.Clock;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
@@ -14,9 +15,11 @@ import java.util.logging.Logger;
  * <p>Lifecycle: 1. Call fetch() to populate the cache for the first time. 2. Subsequent get() calls
  * return the cached document. 3. At 80% of effective TTL, a background refresh is fired
  * asynchronously via the common ForkJoinPool (daemon threads — no explicit shutdown needed). 4. On
- * fetch failure, the stale document is returned (if available).
+ * fetch failure, the stale document is returned (if available) and the next network attempt is
+ * suppressed for a short backoff.
  *
- * <p>Thread-safe. The ReentrantLock prevents concurrent fetch storms.
+ * <p>Thread-safe. The ReentrantLock prevents concurrent fetch storms, and {@link #get()} never
+ * waits on it once a document is cached — see that method.
  */
 public class DocumentCache {
 
@@ -24,6 +27,19 @@ public class DocumentCache {
 
     /** Background refreshes start at this fraction of the effective TTL. */
     private static final double REFRESH_THRESHOLD = 0.80;
+
+    /**
+     * Upper bound on how long a failed refresh suppresses the next network attempt.
+     *
+     * <p>{@link #doFetch} advances {@code cachedAtEpochSeconds} only on success, so against an
+     * endpoint that is down — or one returning a document {@link #validateFetched} rejects — the
+     * cached copy stays permanently expired and every {@link #get()} would otherwise take the
+     * synchronous branch: one full HTTP timeout per call. That is invisible while nothing on a
+     * request path reads the cache, and is not once something does ({@code
+     * AuthplaneClient.refreshMetadataIfDue}). Bounding the retry rate keeps a stale-but-serviceable
+     * document cheap to read.
+     */
+    private static final int FAILURE_BACKOFF_SECONDS = 30;
 
     private final DocumentFetcher fetcher;
     private final String url;
@@ -34,10 +50,14 @@ public class DocumentCache {
 
     private final ReentrantLock fetchLock = new ReentrantLock();
 
+    // Written under fetchLock. Volatile so get() can serve it without waiting for a fetch that
+    // another thread is already performing.
+    private volatile Map<String, Object> cachedDocument;
+
     // Guarded by fetchLock
-    private Map<String, Object> cachedDocument;
     private long cachedAtEpochSeconds; // when the current cache was stored
     private Long serverExpiresAtSeconds; // from HTTP cache headers, or null
+    private long retryNotBeforeEpochSeconds; // set after a failed refresh; 0 = no backoff
 
     // Written under fetchLock; volatile so the package-private accessor can read it without
     // taking fetchLock.
@@ -87,13 +107,28 @@ public class DocumentCache {
             String documentType,
             BiConsumer<Map<String, Object>, Map<String, Object>> onChangeCallback,
             Clock clock) {
+        // Validated here, not only in AuthplaneClientBuilder. These constructors are public API on
+        // JwksCache and MetadataCache, so the builder's check does not cover a caller that builds a
+        // cache directly — and a non-positive interval reaches the same permanent-expiry state the
+        // server-expiry clamp was added for: effectiveTtlSeconds() returns it verbatim, age >= 0 on
+        // the first read, and every get() pays a synchronous fetch.
+        if (configuredRefreshSeconds <= 0) {
+            throw new IllegalArgumentException(
+                    "refresh interval must be positive, got "
+                            + configuredRefreshSeconds
+                            + ": a non-positive interval leaves the document permanently expired,"
+                            + " so every read would pay a synchronous fetch on the caller's"
+                            + " thread.");
+        }
+        // Checked at construction rather than surfacing as an NPE from the first get(), the same
+        // reasoning MetadataCache applies to expectedIssuer.
+        this.clock = Objects.requireNonNull(clock, "clock must not be null");
 
         this.fetcher = fetcher;
         this.url = url;
         this.configuredRefreshSeconds = configuredRefreshSeconds;
         this.documentType = documentType;
         this.onChangeCallback = onChangeCallback;
-        this.clock = clock;
     }
 
     /** Returns the URL this cache fetches from. */
@@ -123,12 +158,25 @@ public class DocumentCache {
     /**
      * Returns the cached document, triggering a background refresh if at 80% of TTL. If the
      * document has fully expired, performs a synchronous refresh. If the refresh fails and a stale
-     * document exists, returns stale.
+     * document exists, returns stale and suppresses the next attempt for {@value
+     * #FAILURE_BACKOFF_SECONDS} seconds (or the configured interval, whichever is shorter).
+     *
+     * <p>Once a document is cached this never blocks on another thread's fetch: if {@code
+     * fetchLock} is held it returns the copy currently published instead of queueing behind a
+     * network round trip. Callers on a request path — verification reads through the metadata cache
+     * before every key lookup — would otherwise serialize on an exclusive lock for the length of an
+     * HTTP timeout. The uncontended path is unchanged.
      *
      * @throws Exception if the document is expired, no stale exists, and fetch fails
      */
     public Map<String, Object> get() throws Exception {
-        fetchLock.lock();
+        Map<String, Object> current = cachedDocument;
+        if (current == null) {
+            fetchLock.lock();
+        } else if (!fetchLock.tryLock()) {
+            LOG.fine(() -> documentType + " refresh in flight elsewhere; serving the current copy");
+            return current;
+        }
         try {
             if (cachedDocument == null) {
                 // No cache at all — must fetch now
@@ -141,7 +189,14 @@ public class DocumentCache {
             long age = now - cachedAtEpochSeconds;
             double fraction = effectiveTtl > 0 ? (double) age / effectiveTtl : 1.0;
 
-            if (age >= effectiveTtl) {
+            if (now < retryNotBeforeEpochSeconds) {
+                LOG.fine(
+                        () ->
+                                documentType
+                                        + " refresh backing off after a failed attempt (retry in "
+                                        + (retryNotBeforeEpochSeconds - now)
+                                        + "s); serving the cached copy");
+            } else if (age >= effectiveTtl) {
                 // Fully expired — refresh now
                 LOG.fine(() -> documentType + " cache expired, refreshing synchronously");
                 doFetch(true); // true = allow stale on failure
@@ -171,10 +226,65 @@ public class DocumentCache {
         }
     }
 
-    /** Forces a cache refresh regardless of TTL. */
+    /**
+     * Forces a cache refresh regardless of TTL, but not regardless of the failure backoff.
+     *
+     * <p>The backoff applies here for the same reason it applies to {@link #get()}: the caller is
+     * on a request path. {@code JwksCache.getKeyByKid(kid, true)} is reached on every {@code kid}
+     * the cached document does not hold, which is exactly the state a rotation to an unreachable
+     * {@code jwks_uri} leaves the process in — tokens arrive signed with keys the old document does
+     * not carry. Fetching unconditionally there costs a full HTTP timeout per verification, on the
+     * caller's thread and serialized behind {@code fetchLock}, which is the failure this cache's
+     * backoff exists to prevent. It is also an amplification surface: an unauthenticated caller
+     * presenting tokens with unknown {@code kid} values would drive one fetch per request.
+     *
+     * <p>While backing off, the currently held document is returned. A caller that finds no usable
+     * key in it fails that verification, which is the correct outcome — the alternative is paying a
+     * doomed network round trip first.
+     */
     public Map<String, Object> forceRefresh() throws Exception {
-        fetchLock.lock();
+        return doForceRefresh(false);
+    }
+
+    /**
+     * Forces a refresh even while backing off from a failed one. Named rather than an overload so
+     * it cannot be reached by flipping a boolean at a call site: no request path should call this.
+     * It exists for callers that are asking a question and want the attempt made — a test, or an
+     * administrative refresh — and are prepared to wait for a timeout.
+     */
+    public Map<String, Object> forceRefreshIgnoringFailureBackoff() throws Exception {
+        return doForceRefresh(true);
+    }
+
+    private Map<String, Object> doForceRefresh(boolean ignoreFailureBackoff) throws Exception {
+        // tryLock, for the same reason {@link #get()} uses it: this is a request-path caller. The
+        // backoff above keeps a *failing* endpoint from costing a fetch per request, but it does
+        // nothing for the burst that arrives before the first failure records retryNotBefore —
+        // those would all queue on an exclusive lock for one HTTP timeout. A caller that finds a
+        // fetch already in flight is served the document currently held; the two methods now
+        // agree that no request-path caller blocks on another thread's fetch.
+        Map<String, Object> inFlight = cachedDocument;
+        if (inFlight != null && !fetchLock.tryLock()) {
+            LOG.fine(() -> documentType + " refresh in flight elsewhere; serving the current copy");
+            return inFlight;
+        }
+        if (inFlight == null) {
+            fetchLock.lock();
+        }
         try {
+            long now = nowEpochSeconds();
+            if (!ignoreFailureBackoff
+                    && cachedDocument != null
+                    && now < retryNotBeforeEpochSeconds) {
+                LOG.fine(
+                        () ->
+                                documentType
+                                        + " forced refresh backing off after a failed attempt (retry"
+                                        + " in "
+                                        + (retryNotBeforeEpochSeconds - now)
+                                        + "s); serving the cached copy");
+                return cachedDocument;
+            }
             doFetch(true);
             return cachedDocument;
         } finally {
@@ -185,15 +295,32 @@ public class DocumentCache {
     // -----------------------------------------------------------------------
     // Internal
 
+    /**
+     * Validation hook for subclasses, applied to a freshly fetched document before it is published
+     * to the cache and before the change callback sees it. The default implementation accepts
+     * everything.
+     *
+     * <p>Rejecting here rather than at read time is what keeps a bad refresh from displacing a good
+     * document: the previously cached copy stays in place and, where a stale fallback is permitted,
+     * keeps being served. It also means a listener wired to the change callback — jwks_uri
+     * rotation, say — is only ever handed a document that passed validation.
+     *
+     * @param document the freshly fetched document
+     * @throws Exception to reject the document
+     */
+    protected void validateFetched(Map<String, Object> document) throws Exception {}
+
     /** Must be called with fetchLock held. */
     private void doFetch(boolean allowStaleOnFailure) throws Exception {
         try {
             FetchResult result = fetcher.fetch(url).get(); // blocks until done
+            validateFetched(result.document());
 
             Map<String, Object> oldDoc = cachedDocument;
             cachedDocument = result.document();
             cachedAtEpochSeconds = nowEpochSeconds();
             serverExpiresAtSeconds = result.expiresAt();
+            retryNotBeforeEpochSeconds = 0;
 
             LOG.info(
                     () ->
@@ -217,6 +344,7 @@ public class DocumentCache {
             Thread.currentThread().interrupt();
             throw e;
         } catch (Exception e) {
+            retryNotBeforeEpochSeconds = nowEpochSeconds() + failureBackoffSeconds();
             if (allowStaleOnFailure && cachedDocument != null) {
                 LOG.log(
                         Level.WARNING,
@@ -224,7 +352,9 @@ public class DocumentCache {
                                 + documentType
                                 + " from "
                                 + url
-                                + "; using stale cache",
+                                + "; using stale cache for up to "
+                                + failureBackoffSeconds()
+                                + "s before retrying",
                         e);
             } else {
                 throw e;
@@ -232,9 +362,55 @@ public class DocumentCache {
         }
     }
 
+    /**
+     * Backoff applied after a failed refresh, never longer than the configured interval — a cache
+     * asked to refresh every 5 seconds must not be pinned to a 30-second retry floor.
+     *
+     * <p>Exposed as a static so the one caller outside this class that retries a network operation
+     * on the verification path — the {@code jwks_uri} rebind in {@code AuthplaneClient}, which
+     * builds a fresh cache per attempt and so has no instance state to carry a backoff on — applies
+     * the same policy rather than a second copy of it.
+     *
+     * @param configuredRefreshSeconds the refresh interval the backoff is being applied to
+     * @return seconds to wait before the next attempt, at least 1
+     */
+    public static long failureBackoffSeconds(long configuredRefreshSeconds) {
+        return Math.max(1, Math.min(FAILURE_BACKOFF_SECONDS, configuredRefreshSeconds));
+    }
+
+    private long failureBackoffSeconds() {
+        return failureBackoffSeconds(configuredRefreshSeconds);
+    }
+
+    /**
+     * The TTL actually in force: the configured interval, shortened by a server expiry when the
+     * server asks for something sooner.
+     *
+     * <p>A server expiry at or before the moment the document was cached is treated as <em>no
+     * preference</em> rather than as an expiry, and the configured interval governs. It has to be:
+     * {@code CacheHeaderParser.parseExpiresAt} returns {@code 0L} for {@code Cache-Control:
+     * no-store} or {@code no-cache}, {@code now} for {@code max-age=0}, and a past epoch for a
+     * stale {@code Expires:} — and subtracting {@code cachedAtEpochSeconds} from any of those
+     * yields a negative TTL. For {@code no-store} that is about -1.7e9.
+     *
+     * <p>A negative TTL makes {@code age >= effectiveTtl} true on every read, so {@link #get()}
+     * takes the synchronous re-fetch branch on the caller's thread every single time, forever. The
+     * failure backoff does not cover it, because that only arms when a fetch *throws*: an endpoint
+     * that answers {@code no-store} successfully clears the backoff and re-arms the expiry on the
+     * same call.
+     *
+     * <p>That was harmless while nothing on a verification path read this cache. It stopped being
+     * harmless when metadata moved onto that path — verification now reads through here before
+     * every key lookup, and that runs before signature verification, so an unauthenticated caller
+     * would set the rate. This is the same failure the backoff was added to remove, reached by a
+     * different door.
+     *
+     * <p>go-sdk clamps the equivalent case the same way: a zero expiry falls back to the configured
+     * default rather than being taken literally.
+     */
     private long effectiveTtlSeconds() {
-        long configuredExpiry = cachedAtEpochSeconds + configuredRefreshSeconds;
-        if (serverExpiresAtSeconds != null) {
+        if (serverExpiresAtSeconds != null && serverExpiresAtSeconds > cachedAtEpochSeconds) {
+            long configuredExpiry = cachedAtEpochSeconds + configuredRefreshSeconds;
             return Math.min(configuredExpiry, serverExpiresAtSeconds) - cachedAtEpochSeconds;
         }
         return configuredRefreshSeconds;

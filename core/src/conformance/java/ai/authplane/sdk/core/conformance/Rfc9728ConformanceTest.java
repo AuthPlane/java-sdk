@@ -1,6 +1,7 @@
 package ai.authplane.sdk.core.conformance;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 
 import java.net.URI;
@@ -156,5 +157,74 @@ class Rfc9728ConformanceTest extends AbstractPlaceholderConformanceTest {
                         ProtectedResourceMetadata.wellKnownPath(
                                 URI.create("https://api.example.com/mcp/")))
                 .isEqualTo("/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
+    @ConformanceCase("rfc9728-well-known-url-must-preserve-the-resource-query-component")
+    void rfc9728_well_known_url_must_preserve_the_resource_query_component() {
+        // RFC 9728 §3 inserts the well-known string "between the host component and the path
+        // and/or query components", so the query survives the derivation. The stimulus is the
+        // full URL rather than the path, because a path-only accessor cannot express a query.
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com/mcp?tenant=a"))
+                .isEqualTo(
+                        "https://api.example.com/.well-known/oauth-protected-resource/mcp?tenant=a");
+
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com/mcp?tenant=b"))
+                .isEqualTo(
+                        "https://api.example.com/.well-known/oauth-protected-resource/mcp?tenant=b");
+
+        // No path and no terminating slash: §3.1 has no slash to remove, so the suffix goes
+        // directly after the host and the query follows it.
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com?x=1"))
+                .isEqualTo("https://api.example.com/.well-known/oauth-protected-resource?x=1");
+
+        // The point of the case: two identifiers differing only by query must not collapse onto
+        // one metadata document URL, which is what makes every tenant on a host distinct.
+        assertThat(ProtectedResourceMetadata.wellKnownUrl("https://api.example.com/mcp?tenant=a"))
+                .isNotEqualTo(
+                        ProtectedResourceMetadata.wellKnownUrl(
+                                "https://api.example.com/mcp?tenant=b"));
+    }
+
+    @Test
+    @ConformanceCase("rfc9728-resource-identifier-must-be-an-absolute-url-with-scheme-and-host")
+    @ConformanceCoverage(
+            level = ConformanceCoverageLevel.PARTIAL,
+            gaps = {
+                "the host half is not gated at construction: \"https:example.com/mcp\" carries a"
+                        + " scheme and no authority, and is refused only at derivation"
+            },
+            note =
+                    "Both values the case exercises are now rejected from the resource factory and"
+                            + " from the PRM builder, by requireScheme. PARTIAL rather than FULL"
+                            + " because the requirement is scheme *and* host and only the scheme"
+                            + " half is enforced where the stimulus points: an identifier with a"
+                            + " scheme but no authority still constructs and throws later, on the"
+                            + " 401 challenge path, which is the shape of failure moving these"
+                            + " gates to construction was meant to remove.")
+    void rfc9728_resource_identifier_must_be_an_absolute_url_with_scheme_and_host() {
+        // Each value rejects on its own — the case is explicit that rejecting one does not satisfy
+        // it, because a guard that only asks "opaque or authority-less?" catches "/mcp" while
+        // letting the scheme-relative form through.
+        for (String identifier : List.of("/mcp", "//api.example.com/mcp")) {
+            assertThatThrownBy(() -> ProtectedResourceMetadata.requireScheme(identifier))
+                    .isInstanceOf(IllegalArgumentException.class);
+
+            assertThatThrownBy(
+                            () ->
+                                    ProtectedResourceMetadata.builder()
+                                            .resource(identifier)
+                                            .authorizationServer(TestFixtures.ISSUER)
+                                            .build())
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        // Scheme-and-host, not https-only: local development loops depend on this one constructing.
+        assertDoesNotThrow(
+                () ->
+                        ProtectedResourceMetadata.builder()
+                                .resource("http://localhost:8080/mcp")
+                                .authorizationServer(TestFixtures.ISSUER)
+                                .build());
     }
 }
