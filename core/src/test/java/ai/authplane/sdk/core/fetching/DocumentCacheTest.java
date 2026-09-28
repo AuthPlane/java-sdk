@@ -14,6 +14,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 
 import org.junit.jupiter.api.Test;
@@ -105,7 +106,7 @@ class DocumentCacheTest {
     }
 
     @Test
-    void forceRefresh_alwaysFetches() throws Exception {
+    void forceRefresh_fetchesWhenNotBackingOff() throws Exception {
         AtomicInteger fetchCount = new AtomicInteger();
         cache = cacheWith(countingFetcher(DOC_V1, fetchCount), 300);
         cache.fetch();
@@ -168,11 +169,12 @@ class DocumentCacheTest {
     /**
      * A server expiry that is not in the future is no expiry at all.
      *
-     * <p>`Cache-Control: no-store` and `no-cache` parse to `0L`, `max-age=0` to `now`, and a stale
-     * `Expires:` to a past epoch. Subtracting the cache timestamp from any of those gives a
-     * negative TTL, which makes the document permanently expired: every read takes the synchronous
-     * re-fetch branch, on the caller's thread. The failure backoff cannot help, because a
-     * `no-store` endpoint that *answers* clears it and re-arms the expiry on the same call.
+     * <p>`max-age=0` parses to `now` and a stale `Expires:` to a past epoch. Taking either as an
+     * expiry gives a non-positive TTL, which makes the document permanently expired: every read
+     * takes the synchronous re-fetch branch, on the caller's thread. The failure backoff cannot
+     * help, because an endpoint that *answers* clears it and re-arms the expiry on the same call.
+     * `no-store` and `no-cache` used to arrive here as `0L`; they now parse to `null` and no longer
+     * reach the clamp, which still covers them.
      *
      * <p>This matters now that verification reads through the metadata cache on every key lookup —
      * and does so before signature verification, so an unauthenticated caller would set the fetch
@@ -180,7 +182,8 @@ class DocumentCacheTest {
      */
     @Test
     void get_serverExpiryNotInTheFuture_fallsBackToTheConfiguredInterval() throws Exception {
-        // 0L is what no-store and no-cache parse to; -1 stands for a stale Expires: header.
+        // 0L is what no-store and no-cache used to parse to; -1 stands for a stale Expires:
+        // header. Both stay as defensive fixtures: the clamp must hold for any non-future value.
         for (long serverExpiry : new long[] {0L, -1L}) {
             AtomicInteger fetchCount = new AtomicInteger();
             TestClock clock = new TestClock();
@@ -294,6 +297,118 @@ class DocumentCacheTest {
         void advanceSeconds(long seconds) {
             nowSeconds.addAndGet(seconds);
         }
+    }
+
+    @Test
+    void forceRefresh_respectsTheFailureBackoff_theIgnoringVariantDoesNot() throws Exception {
+        // The pair these two methods' semantics turn on. forceRefresh() is reachable from a
+        // request path, so a failing endpoint must not cost a fetch per call;
+        // forceRefreshIgnoringFailureBackoff() is for the caller that wants the attempt made and
+        // is prepared to wait for the timeout.
+        AtomicInteger fetchCount = new AtomicInteger();
+        TestClock clock = new TestClock();
+        DocumentFetcher fetcher =
+                url -> {
+                    int n = fetchCount.incrementAndGet();
+                    if (n == 2) {
+                        return CompletableFuture.failedFuture(
+                                new RuntimeException("jwks endpoint down"));
+                    }
+                    return CompletableFuture.completedFuture(
+                            new FetchResult(n == 1 ? DOC_V1 : DOC_V2, null));
+                };
+        cache = cacheWith(fetcher, 100, clock);
+        cache.fetch(); // fetch 1 — DOC_V1
+
+        clock.advanceSeconds(101); // expired, so get() refreshes synchronously and that fetch fails
+        assertThat(cache.get()).as("stale is served when the refresh fails").isEqualTo(DOC_V1);
+        assertThat(fetchCount.get()).as("the failed refresh armed the backoff").isEqualTo(2);
+
+        assertThat(cache.forceRefresh()).isEqualTo(DOC_V1);
+        assertThat(fetchCount.get())
+                .as("forceRefresh() does not fetch while the backoff is armed")
+                .isEqualTo(2);
+
+        assertThat(cache.forceRefreshIgnoringFailureBackoff()).isEqualTo(DOC_V2);
+        assertThat(fetchCount.get()).as("the ignoring variant makes the attempt").isEqualTo(3);
+    }
+
+    // Bounded for the same reason as the get() test below: a regression here blocks, and an
+    // unbounded hang surfaces as a build timeout instead of a named failure.
+    @Test
+    @Timeout(10)
+    void forceRefresh_whileARefreshIsInFlight_waitsForTheDocumentThatLands() throws Exception {
+        // forceRefresh() deliberately blocks where get() returns early, and the asymmetry is the
+        // point. get()'s caller wants *a* document, so the published copy answers it. This
+        // caller wants a *newer* one: JwksCache.getKeyByKid(kid, true) reaches forceRefresh()
+        // precisely because the held document does not carry the kid. Serving that same document
+        // back guaranteed the lookup found nothing, so every concurrent kid-miss caller saw a
+        // spurious invalid_token for the length of every healthy rotation's fetch window.
+        CountDownLatch fetchStarted = new CountDownLatch(1);
+        CountDownLatch releaseFetch = new CountDownLatch(1);
+        AtomicInteger fetchCount = new AtomicInteger();
+        TestClock clock = new TestClock();
+        DocumentFetcher fetcher =
+                url ->
+                        CompletableFuture.supplyAsync(
+                                () -> {
+                                    if (fetchCount.incrementAndGet() > 1) {
+                                        fetchStarted.countDown();
+                                        try {
+                                            releaseFetch.await();
+                                        } catch (InterruptedException e) {
+                                            Thread.currentThread().interrupt();
+                                            throw new CompletionException(e);
+                                        }
+                                        return new FetchResult(DOC_V2, null);
+                                    }
+                                    return new FetchResult(DOC_V1, null);
+                                });
+        cache = cacheWith(fetcher, 100, clock);
+        cache.fetch();
+
+        clock.advanceSeconds(101); // expired, so the refresher below takes the synchronous branch
+
+        Thread refresher =
+                new Thread(
+                        () -> {
+                            try {
+                                cache.get();
+                            } catch (Exception e) {
+                                throw new IllegalStateException(e);
+                            }
+                        });
+        refresher.start();
+        assertThat(fetchStarted.await(5, TimeUnit.SECONDS))
+                .as("the refresh reached the fetcher and is holding fetchLock")
+                .isTrue();
+
+        AtomicReference<Map<String, Object>> forced = new AtomicReference<>();
+        Thread forcer =
+                new Thread(
+                        () -> {
+                            try {
+                                forced.set(cache.forceRefresh());
+                            } catch (Exception e) {
+                                throw new IllegalStateException(e);
+                            }
+                        });
+        forcer.start();
+
+        // releaseFetch has not been counted down, so a forceRefresh that served the in-flight
+        // copy would already have returned. Still running means it is waiting on fetchLock.
+        forcer.join(500);
+        assertThat(forcer.isAlive()).as("forceRefresh waits for the fetch in flight").isTrue();
+
+        releaseFetch.countDown();
+        forcer.join(5_000);
+        refresher.join(5_000);
+        assertThat(forcer.isAlive()).isFalse();
+
+        assertThat(forced.get())
+                .as("the waiter is served the document that landed, not the one it already held")
+                .isEqualTo(DOC_V2);
+        assertThat(fetchCount.get()).as("waiting did not cost a second fetch").isEqualTo(2);
     }
 
     // A regression here blocks rather than returning the wrong value, and in CI a hang is not

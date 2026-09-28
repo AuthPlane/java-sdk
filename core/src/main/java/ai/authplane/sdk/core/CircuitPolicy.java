@@ -21,12 +21,14 @@ public final class CircuitPolicy {
     /** OAuth {@code error} values where the AS responded correctly — do not trip the breaker. */
     private static final Set<String> OAUTH_ERRORS_NO_CIRCUIT =
             Set.of(
+                    "access_denied",
                     "consent_required",
                     "interaction_required",
                     "invalid_grant",
                     "invalid_scope",
                     "invalid_dpop_proof",
                     "invalid_request",
+                    "invalid_target",
                     "unsupported_grant_type");
 
     private static final int MAX_CAUSE_DEPTH = 8;

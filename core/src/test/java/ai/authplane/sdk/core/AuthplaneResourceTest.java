@@ -333,6 +333,89 @@ class AuthplaneResourceTest {
     }
 
     @Test
+    void resourceMetadataUrl_noOverride_isTheDerivedPrmUrl() throws Exception {
+        // The default topology: this server hosts the document, and the challenge advertises the
+        // URL it is served at. Byte-identical to prmUrl(), which the adapters used to read.
+        resource = createResource("https://mcp.example.com/mcp");
+        assertThat(resource.resourceMetadataUrl()).isEqualTo(resource.prmUrl());
+        assertThat(resource.resourceMetadataUrl())
+                .isEqualTo("https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
+    void resourceMetadataUrl_override_replacesTheDerivedUrl() throws Exception {
+        // The AS-hosted topology: authserver >= 0.2.0 publishes the document for every registered
+        // resource, and this server only points at it. prmUrl() keeps deriving the resource-hosted
+        // URL — the override governs what is advertised, not where a served document would live.
+        client = AuthplaneClient.builder(baseUrl).devMode(true).build().get();
+        resource =
+                client.resource(
+                        "https://mcp.example.com/mcp",
+                        TestFixtures.SCOPES,
+                        ResourceOptions.builder()
+                                .resourceMetadataUrl(
+                                        "https://auth.example.com/.well-known/oauth-protected-resource/mcp")
+                                .build());
+
+        assertThat(resource.resourceMetadataUrl())
+                .isEqualTo("https://auth.example.com/.well-known/oauth-protected-resource/mcp");
+        assertThat(resource.prmUrl())
+                .isEqualTo("https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
+        assertThat(resource.prmPath()).isEqualTo("/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
+    void resourceMetadataUrl_httpOverrideOnHttpsResource_isAccepted() throws Exception {
+        // No comparison against the resource identifier's own scheme: the derived PRM URL this
+        // value replaces is not scheme-narrowed either, and a narrower gate refuses the in-cluster
+        // and docker-compose topologies dev mode exists to serve. One acceptance envelope for this
+        // property across the SDKs matters more than the marginal hardening, since the same
+        // deployment config has to start everywhere.
+        client = AuthplaneClient.builder(baseUrl).devMode(true).build().get();
+        resource =
+                client.resource(
+                        "https://mcp.example.com/mcp",
+                        TestFixtures.SCOPES,
+                        ResourceOptions.builder()
+                                .resourceMetadataUrl(
+                                        "http://auth.example.com/.well-known/oauth-protected-resource/mcp")
+                                .build());
+
+        assertThat(resource.resourceMetadataUrl())
+                .isEqualTo("http://auth.example.com/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
+    void resourceMetadataUrl_rawNonAsciiInQuery_throwsAtConfiguration() {
+        // Same gate the identifier's query gets. URI.create does not stand in for it: it rejects
+        // only space, ", \, |, ^, {, }, < and >, so a raw non-ASCII octet would otherwise be
+        // spliced into the WWW-Authenticate header.
+        assertThatThrownBy(
+                        () ->
+                                ResourceOptions.builder()
+                                        .resourceMetadataUrl("https://auth.example.com/prm?x=café")
+                                        .build())
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void resourceMetadataUrl_httpOverrideOnHttpResource_isAccepted() throws Exception {
+        // The local topology the demos use: an http resource pointing at an http AS document.
+        client = AuthplaneClient.builder(baseUrl).devMode(true).build().get();
+        resource =
+                client.resource(
+                        "http://localhost:8080/mcp",
+                        TestFixtures.SCOPES,
+                        ResourceOptions.builder()
+                                .resourceMetadataUrl(
+                                        "http://localhost:9000/.well-known/oauth-protected-resource/mcp")
+                                .build());
+
+        assertThat(resource.resourceMetadataUrl())
+                .isEqualTo("http://localhost:9000/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
     void normalizeRequestUrl_substitutesResourceHost_keepsRequestPath() throws Exception {
         resource = createResource("https://api.example.com/mcp");
         // The request arrives on an internal/proxy host; htu must use the canonical resource host

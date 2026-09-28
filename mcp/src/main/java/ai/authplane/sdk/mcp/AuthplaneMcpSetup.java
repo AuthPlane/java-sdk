@@ -191,6 +191,7 @@ public final class AuthplaneMcpSetup {
         private boolean useBuiltinRevocationChecker = false;
         private RevocationChecker revocationChecker;
         private InboundDPoPOptions inboundDPoP;
+        private String resourceMetadataUrl;
 
         private Builder() {}
 
@@ -302,6 +303,19 @@ public final class AuthplaneMcpSetup {
         }
 
         /**
+         * Advertises {@code url} as the RFC 9728 document's location instead of the resource-hosted
+         * one derived from {@link #resource(String)}, for a deployment where the authorization
+         * server publishes the document (authserver serves one per registered resource) and this
+         * server cannot serve the well-known path itself. Reaches every challenge built from {@link
+         * AuthplaneResource#resourceMetadataUrl()}; see the user guide for the transport-tier
+         * limitation on this adapter's own 401/403 responses.
+         */
+        public Builder resourceMetadataUrl(String url) {
+            this.resourceMetadataUrl = Objects.requireNonNull(url, "url must not be null");
+            return this;
+        }
+
+        /**
          * Validates configuration, creates the client, verifier, adapter, and PRM servlet.
          *
          * @return CompletableFuture completing with the ready-to-use setup
@@ -344,6 +358,8 @@ public final class AuthplaneMcpSetup {
                                 if (useBuiltinRevocationChecker)
                                     optBuilder.useBuiltinRevocationChecker();
                                 if (inboundDPoP != null) optBuilder.inboundDPoP(inboundDPoP);
+                                if (resourceMetadataUrl != null)
+                                    optBuilder.resourceMetadataUrl(resourceMetadataUrl);
 
                                 AuthplaneResource authplaneResource =
                                         client.resource(this.resource, scopes, optBuilder.build());

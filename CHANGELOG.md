@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `AccessDeniedException` and `InvalidTargetException` (subtypes of `TokenExchangeException`) for the `access_denied` (403) and `invalid_target` (400) token errors authserver 0.2.0 returns on a non-allowlisted cross-client exchange and on a `resource` that does not match a granted resource exactly; neither counts toward the circuit breaker.
+- `ResourceOptions.builder().resourceMetadataUrl(...)`, Spring's `authplane.resource-metadata-url` and `AuthplaneMcpSetup.Builder.resourceMetadataUrl(...)` point the challenge's `resource_metadata` at an AS-hosted RFC 9728 document; `AuthplaneResource.resourceMetadataUrl()` is what adapters advertise. Gated at construction like the resource identifier: absolute `http(s)` with a host, no fragment, no userinfo, and a valid RFC 3986 query.
+- New `WwwAuthenticate.descriptionFor(errorCode)` and `FALLBACK_ERROR_DESCRIPTION`, plus `verboseDescription` overloads on `WwwAuthenticate.of(...)` and `FailureResponse.of(...)` that restore the exception message for local debugging.
+
+### Changed
+
+- **BREAKING** `WwwAuthenticate.of(...)` and `FailureResponse.of(...)` now emit a fixed `error_description` chosen by the `error` code — on the challenge and in the JSON body alike — instead of the exception message. **Migration**: log `getMessage()` server-side, or pass `verboseDescription: true`.
+- **BREAKING** The `ServerTransportSecurityException` the `mcp` and `spring` adapters raise now carries the fixed per-code sentence, not the exception message, which the MCP SDK's transport renders into the response. `extract(...)` still throws the typed exception with its own message.
+- **BREAKING** `AuthplaneAuthenticationProvider` no longer reflects the exception message into the `OAuth2AuthenticationException` it raises; both the `OAuth2Error` description and the exception message now carry the fixed per-code sentence. The SDK's own entry point discarded both, but an application wiring this provider under Spring's `oauth2ResourceServer` gets `BearerTokenAuthenticationEntryPoint`, which renders the description straight into `error_description` — and `server.error.include-message=always` put the message in the error body. **Migration:** read `getCause()` for the original exception, which is unchanged.
+- **BREAKING** `ASCredentials` now rejects a blank `clientSecret` at construction: authserver ≥ 0.1.2 answers `active: false` to unauthenticated introspection, so a public client would silently reject every token as revoked. Register a confidential client and pass its secret.
+- The built-in introspection checker warns at construction when the client has no `AuthProvider`, and once per checker when the AS answers `active: false` for a token that passed local verification, pointing at the runtime-client requirement (`authserver admin resource runtime-client add`).
+- **BREAKING** A resource identifier must now name a host at construction, not just carry a scheme: `urn:example:api`, `https:///mcp` and `https://:8443/mcp` are rejected by the new `ProtectedResourceMetadata.requireAuthority(String)` gate, which every construction path calls. An opaque identifier bound every DPoP request to the literal origin `urn://null`. **Migration:** configure the absolute URL clients address, e.g. `https://api.example.com/mcp`.
+- `DocumentCache.forceRefresh()` now waits for a refresh already in flight instead of returning the document it holds as 0.2.0 did — its caller reaches it precisely because that document lacks the `kid`.
+- Documentation correction for 0.2.0: `DocumentCache`'s constructor has refused a non-positive refresh interval and a null clock since that release — both reached the same permanent-expiry state the 0.2.0 cache-directive fix closed — and the published 0.2.0 notes never recorded it. An embedder constructing `JwksCache` or `MetadataCache` directly with a refresh interval of `0` upgrades from 0.1.0 and gets an `IllegalArgumentException` at construction with nothing in the changelog explaining it.
+
+### Deprecated
+
+- `VerifiedClaims.mayAct()`: authserver 0.2.0 no longer issues `may_act`; removed in the next minor.
+
 ## [0.2.0] - 2026-09-09
 
 ### Added

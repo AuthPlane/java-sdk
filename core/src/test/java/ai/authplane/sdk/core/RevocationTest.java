@@ -7,9 +7,14 @@ import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -94,6 +99,69 @@ class RevocationTest {
     /** Token signed with the WireMock server as issuer. */
     private String localIssuerToken() {
         return TestFixtures.token().rsaKey(rsaKeys).issuer(baseUrl).build();
+    }
+
+    /** Stubs metadata (issuer=baseUrl) that also advertises an introspection endpoint. */
+    private void stubMetadataWithIntrospection() {
+        String metadataBody =
+                TestFixtures.serializeMap(
+                        Map.of(
+                                "issuer",
+                                baseUrl,
+                                "jwks_uri",
+                                baseUrl + "/jwks",
+                                "introspection_endpoint",
+                                baseUrl + "/introspect"));
+        wireMock.stubFor(
+                get(urlEqualTo("/.well-known/oauth-authorization-server"))
+                        .willReturn(
+                                aResponse()
+                                        .withStatus(200)
+                                        .withHeader("Content-Type", "application/json")
+                                        .withBody(metadataBody)));
+    }
+
+    private void stubIntrospection(String body) {
+        wireMock.stubFor(
+                post(urlEqualTo("/introspect"))
+                        .willReturn(
+                                aResponse()
+                                        .withStatus(200)
+                                        .withHeader("Content-Type", "application/json")
+                                        .withBody(body)));
+    }
+
+    /** Runs {@code body} while capturing WARNING records emitted by the built-in checker. */
+    private static List<LogRecord> captureCheckerWarnings(ThrowingRunnable body) throws Exception {
+        Logger logger = Logger.getLogger(IntrospectionChecker.class.getName());
+        List<LogRecord> records = new ArrayList<>();
+        Handler handler =
+                new Handler() {
+                    @Override
+                    public void publish(LogRecord record) {
+                        if (record.getLevel().intValue() >= Level.WARNING.intValue()) {
+                            records.add(record);
+                        }
+                    }
+
+                    @Override
+                    public void flush() {}
+
+                    @Override
+                    public void close() {}
+                };
+        logger.addHandler(handler);
+        try {
+            body.run();
+        } finally {
+            logger.removeHandler(handler);
+        }
+        return records;
+    }
+
+    @FunctionalInterface
+    private interface ThrowingRunnable {
+        void run() throws Exception;
     }
 
     // -----------------------------------------------------------------------
@@ -200,6 +268,50 @@ class RevocationTest {
                 .isInstanceOf(TokenRevokedException.class);
     }
 
+    /**
+     * The interrupt arm also restores the flag the catch consumed. That half is not asserted here:
+     * verify() runs on the common ForkJoinPool, whose worker clears the flag as the task completes,
+     * so it is no longer readable from this thread by the time get() returns.
+     */
+    @Test
+    void verify_customChecker_interrupted_failOpenByDefault() throws Exception {
+        RevocationChecker interrupted =
+                (token, jti) -> {
+                    throw new InterruptedException("executor shutting down");
+                };
+        AuthplaneClient client = buildClient();
+        AuthplaneResource verifier =
+                buildVerifier(
+                        client, ResourceOptions.builder().revocationChecker(interrupted).build());
+
+        VerifiedClaims claims = verifier.verify(localIssuerToken()).get().claims();
+
+        assertThat(claims.jti()).isEqualTo(TestFixtures.JTI);
+    }
+
+    @Test
+    void verify_customChecker_interrupted_failClosed_rejectsAsInterruptedNotRevoked()
+            throws Exception {
+        RevocationChecker interrupted =
+                (token, jti) -> {
+                    throw new InterruptedException("executor shutting down");
+                };
+        AuthplaneClient client = buildClient();
+        AuthplaneResource verifier =
+                buildVerifier(
+                        client,
+                        ResourceOptions.builder()
+                                .revocationChecker(interrupted)
+                                .failClosed()
+                                .build());
+
+        assertThatThrownBy(() -> verifier.verify(localIssuerToken()).get())
+                .isInstanceOf(ExecutionException.class)
+                .cause()
+                .isInstanceOf(TokenRevokedException.class)
+                .hasMessageContaining("revocation check was interrupted");
+    }
+
     // -----------------------------------------------------------------------
     // Built-in introspection (default)
     // -----------------------------------------------------------------------
@@ -289,6 +401,105 @@ class RevocationTest {
                 .isInstanceOf(ExecutionException.class)
                 .cause()
                 .isInstanceOf(TokenRevokedException.class);
+    }
+
+    @Test
+    void builtinIntrospection_withoutAuthProvider_warnsAtConstruction() throws Exception {
+        // authserver >= 0.1.2 answers active=false to unauthenticated introspection, so a checker
+        // wired without credentials rejects every token; say so when it is built, not per token.
+        stubMetadataWithIntrospection();
+        AuthplaneClient client = AuthplaneClient.builder(baseUrl).devMode(true).build().get();
+
+        List<LogRecord> warnings =
+                captureCheckerWarnings(
+                        () ->
+                                buildVerifier(
+                                        client,
+                                        ResourceOptions.builder()
+                                                .useBuiltinRevocationChecker()
+                                                .build()));
+
+        assertThat(warnings).hasSize(1);
+        assertThat(warnings.get(0).getMessage())
+                .contains("without an AuthProvider")
+                .contains("active=false")
+                .contains("runtime-client");
+    }
+
+    @Test
+    void builtinIntrospection_withAuthProvider_noConstructionWarning() throws Exception {
+        stubMetadataWithIntrospection();
+        AuthplaneClient client =
+                AuthplaneClient.builder(baseUrl)
+                        .devMode(true)
+                        .authProvider(new ASCredentials("my-rs", "s3cret"))
+                        .build()
+                        .get();
+
+        List<LogRecord> warnings =
+                captureCheckerWarnings(
+                        () ->
+                                buildVerifier(
+                                        client,
+                                        ResourceOptions.builder()
+                                                .useBuiltinRevocationChecker()
+                                                .build()));
+
+        assertThat(warnings).isEmpty();
+    }
+
+    @Test
+    void builtinIntrospection_activeFalseAfterLocalVerify_logsOwnershipWarningOnce()
+            throws Exception {
+        stubMetadataWithIntrospection();
+        stubIntrospection("{\"active\":false}");
+        AuthplaneClient client =
+                AuthplaneClient.builder(baseUrl)
+                        .devMode(true)
+                        .authProvider(new ASCredentials("my-rs", "s3cret"))
+                        .build()
+                        .get();
+        AuthplaneResource verifier =
+                buildVerifier(
+                        client, ResourceOptions.builder().useBuiltinRevocationChecker().build());
+
+        List<LogRecord> warnings =
+                captureCheckerWarnings(
+                        () -> {
+                            for (int i = 0; i < 2; i++) {
+                                assertThatThrownBy(() -> verifier.verify(localIssuerToken()).get())
+                                        .isInstanceOf(ExecutionException.class)
+                                        .cause()
+                                        .isInstanceOf(TokenRevokedException.class);
+                            }
+                        });
+
+        // Two rejected tokens, one warning: the guidance is logged once per checker.
+        assertThat(warnings).hasSize(1);
+        assertThat(warnings.get(0).getMessage())
+                .contains("jti='" + TestFixtures.JTI + "'")
+                .contains("passed local JWT verification")
+                .contains("runtime-client add --client-id <rs-client-id> --slug <resource-slug>");
+    }
+
+    @Test
+    void builtinIntrospection_activeTrue_noOwnershipWarning() throws Exception {
+        stubMetadataWithIntrospection();
+        stubIntrospection("{\"active\":true}");
+        AuthplaneClient client =
+                AuthplaneClient.builder(baseUrl)
+                        .devMode(true)
+                        .authProvider(new ASCredentials("my-rs", "s3cret"))
+                        .build()
+                        .get();
+        AuthplaneResource verifier =
+                buildVerifier(
+                        client, ResourceOptions.builder().useBuiltinRevocationChecker().build());
+
+        List<LogRecord> warnings =
+                captureCheckerWarnings(() -> verifier.verify(localIssuerToken()).get());
+
+        assertThat(warnings).isEmpty();
     }
 
     @Test

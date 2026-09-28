@@ -16,6 +16,10 @@ OAuth 2.1 JWT validation and token operations for Java resource servers, with fi
 
 Requires Java 21+.
 
+## Compatibility
+
+Tested against authserver 0.2.0. Introspection-based revocation (`useBuiltinRevocationChecker()`) requires authserver 0.1.2 or later, which only answers the token's issuing client or a runtime-client of the resource — see the user guides.
+
 ## Quickstart — MCP server with auth
 
 Using the [`authplane-mcp`](mcp/README.md) adapter for the [MCP Java SDK](https://github.com/modelcontextprotocol/java-sdk)'s servlet transport:

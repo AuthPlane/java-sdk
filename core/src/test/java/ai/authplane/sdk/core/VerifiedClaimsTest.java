@@ -116,17 +116,20 @@ class VerifiedClaimsTest {
     }
 
     @Test
+    @SuppressWarnings("removal")
     void mayAct_present_returnedAsImmutableCopy() {
         VerifiedClaims c = claims(Map.of("may_act", Map.of("sub", "actor")));
         assertThat(c.mayAct()).containsEntry("sub", "actor");
     }
 
     @Test
+    @SuppressWarnings("removal")
     void mayAct_absent_returnsNull() {
         assertThat(claims(Map.of()).mayAct()).isNull();
     }
 
     @Test
+    @SuppressWarnings("removal")
     void mayAct_nonMap_returnsNull() {
         assertThat(claims(Map.of("may_act", List.of("not-a-map"))).mayAct()).isNull();
     }

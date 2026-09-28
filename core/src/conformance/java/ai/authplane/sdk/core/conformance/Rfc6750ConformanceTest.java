@@ -22,7 +22,13 @@ class Rfc6750ConformanceTest {
         String expired = WwwAuthenticate.of(new TokenExpiredException("expired"));
         assertThat(expired).startsWith("Bearer ");
         assertThat(expired).contains("error=\"invalid_token\"");
-        assertThat(expired).contains("error_description=\"expired\"");
+        // RFC 6750 §3 does not require error_description to be diagnostic, and the
+        // challenge answers an unauthenticated caller, so it is the fixed per-code
+        // sentence rather than the exception's message.
+        assertThat(expired)
+                .contains(
+                        "error_description=\"The access token is missing or not valid for this resource\"");
+        assertThat(expired).doesNotContain("expired\"");
 
         // invalid_signature → Bearer invalid_token
         String badSig = WwwAuthenticate.of(new InvalidSignatureException("bad sig"));

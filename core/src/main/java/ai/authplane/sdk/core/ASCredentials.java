@@ -15,15 +15,24 @@ import java.util.Objects;
  * {@code client_id} and {@code client_secret} form-urlencoded before being Base64-encoded. Supply
  * it anywhere an {@link AuthProvider} is expected.
  *
+ * <p>Both parts must be non-blank: a public (secret-less) client cannot introspect, revoke or
+ * exchange against authserver, which answers {@code active: false} to unauthenticated
+ * introspection.
+ *
  * @see AuthplaneClientBuilder#authProvider(AuthProvider)
  */
 public record ASCredentials(String clientId, String clientSecret) implements AuthProvider {
 
-    /** Validates that clientId is non-null and non-blank, and clientSecret is non-null. */
+    /** Validates that clientId and clientSecret are both non-null and non-blank. */
     public ASCredentials {
         Objects.requireNonNull(clientId, "clientId must not be null");
         if (clientId.isBlank()) throw new IllegalArgumentException("clientId must not be blank");
         Objects.requireNonNull(clientSecret, "clientSecret must not be null");
+        if (clientSecret.isBlank()) {
+            throw new IllegalArgumentException(
+                    "clientSecret must not be blank: a public client cannot authenticate to the"
+                            + " token, introspection or revocation endpoint");
+        }
     }
 
     @Override

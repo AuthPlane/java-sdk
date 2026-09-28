@@ -18,6 +18,7 @@ import ai.authplane.sdk.core.dpop.MultipleDpopProofsException;
 import ai.authplane.sdk.core.dpop.VerificationRequestContext;
 import ai.authplane.sdk.core.errors.AuthplaneException;
 import ai.authplane.sdk.core.errors.InsufficientScopeException;
+import ai.authplane.sdk.core.errors.WwwAuthenticate;
 import ai.authplane.sdk.core.http.HttpHeaders;
 import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.server.McpTransportContextExtractor;
@@ -154,7 +155,7 @@ public final class AuthplaneMcpAdapter
         try {
             VerificationRequestContext.assertSingleDpopHeader(HttpHeaders.values(headers, "dpop"));
         } catch (MultipleDpopProofsException e) {
-            throw new ServerTransportSecurityException(401, e.getMessage());
+            throw new ServerTransportSecurityException(401, safeDescription(e));
         }
 
         try {
@@ -276,12 +277,26 @@ public final class AuthplaneMcpAdapter
      * the correct HTTP status.
      */
     private static ServerTransportSecurityException mapToSecurityException(Throwable t) {
-        if (t instanceof InsufficientScopeException) {
-            return new ServerTransportSecurityException(403, t.getMessage());
+        if (t instanceof InsufficientScopeException ise) {
+            return new ServerTransportSecurityException(403, safeDescription(ise));
         }
-        if (t instanceof AuthplaneException) {
-            return new ServerTransportSecurityException(401, t.getMessage());
+        if (t instanceof AuthplaneException ae) {
+            return new ServerTransportSecurityException(401, safeDescription(ae));
         }
         return new ServerTransportSecurityException(401, "Token verification failed");
+    }
+
+    /**
+     * The fixed, caller-safe sentence for an exception, rather than its own message.
+     *
+     * <p>The MCP SDK's transport renders this message into the response it sends the caller, so
+     * whatever is put here reaches someone who by definition has not authenticated — the same seam
+     * {@code WwwAuthenticate} closes for the challenge this adapter does not build. The SDK's
+     * messages name the unknown {@code kid}, the claim that did not validate, and on an audience
+     * mismatch the exact {@code aud} the resource expects. The original exception is still thrown
+     * with its own message available to the server's logs.
+     */
+    private static String safeDescription(AuthplaneException error) {
+        return WwwAuthenticate.descriptionFor(WwwAuthenticate.errorCodeFor(error));
     }
 }

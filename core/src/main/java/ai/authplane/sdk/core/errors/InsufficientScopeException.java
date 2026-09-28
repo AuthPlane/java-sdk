@@ -22,9 +22,10 @@ public class InsufficientScopeException extends AuthplaneException {
 
     /**
      * Creates an exception indicating the token is missing one or more of {@code requiredScopes}
-     * (logical AND). The message names every <em>missing</em> scope so the RFC 6750 {@code
-     * error_description} (derived from {@link #getMessage()}) doesn't surface just the first one,
-     * while {@link #getRequiredScopes()} carries the full requested set.
+     * (logical AND). The message names every <em>missing</em> scope for the server-side log; the
+     * RFC 6750 {@code error_description} is no longer derived from it, and carries the fixed
+     * caller-safe sentence instead. {@link #getRequiredScopes()} carries the full requested set,
+     * which is what a challenge's {@code scope} parameter is built from.
      *
      * @param requiredScopes all scopes the caller required; must be non-empty
      * @param availableScopes the scopes actually present on the token

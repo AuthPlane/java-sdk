@@ -56,6 +56,9 @@ public class AuthplaneResource {
     private final boolean failClosed;
     private final InboundDPoPOptions inboundDPoP;
 
+    // Operator-configured override for the advertised PRM URL — null means "derive it".
+    private final String resourceMetadataUrl;
+
     // -----------------------------------------------------------------------
     // Package-private constructor — created by AuthplaneClient.resource()
     // -----------------------------------------------------------------------
@@ -73,6 +76,10 @@ public class AuthplaneResource {
         // spliced into the DPoP htu binding target in normalizeRequestUrl below, where a missing
         // one reads as the literal text "null" and fails every DPoP-bound request.
         ProtectedResourceMetadata.requireScheme(resourceUri);
+        // Authoritative authority gate, for the other half of the same splice: normalizeRequestUrl
+        // reads base.getRawAuthority(), which is null for an identifier that names no host, so
+        // "urn:example:api" bound every request to the literal origin "urn://null".
+        ProtectedResourceMetadata.requireAuthority(resourceUri);
         // Authoritative userinfo gate: the identifier is published verbatim as the PRM `resource`
         // member and in the resource_metadata parameter of the 401 challenge, both of which reach
         // unauthenticated callers, so a credential in the authority must not get this far.
@@ -92,6 +99,7 @@ public class AuthplaneResource {
         }
         this.failClosed = options.failClosed();
         this.inboundDPoP = options.inboundDPoP();
+        this.resourceMetadataUrl = options.resourceMetadataUrl();
 
         // KeyLookup reads through the client's JWKS cache, after giving the metadata cache the
         // chance to re-read: verification is the only traffic a verify-only resource server has,
@@ -292,6 +300,18 @@ public class AuthplaneResource {
             }
         } catch (TokenRevokedException e) {
             throw e;
+        } catch (InterruptedException e) {
+            // The check never produced a verdict: restore the flag the catch cleared so the
+            // caller's shutdown path still sees the interrupt, and report it as a failed check
+            // rather than letting the fail-closed branch below call the token revoked.
+            Thread.currentThread().interrupt();
+            if (failClosed) {
+                throw new TokenRevokedException(
+                        "Token with jti='"
+                                + claims.jti()
+                                + "' rejected: revocation check was interrupted");
+            }
+            LOG.warning("Revocation check interrupted (fail-open) for jti='" + claims.jti() + "'");
         } catch (Exception e) {
             if (failClosed) {
                 throw new TokenRevokedException(
@@ -370,6 +390,31 @@ public class AuthplaneResource {
      */
     public String prmUrl() {
         return ProtectedResourceMetadata.wellKnownUrl(resourceUri);
+    }
+
+    /**
+     * Returns the URL to advertise in the {@code resource_metadata} parameter of a {@code
+     * WWW-Authenticate} challenge (RFC 9728 §5.3): the operator-configured {@link
+     * ResourceOptions.Builder#resourceMetadataUrl(String)} when one is set, otherwise the derived
+     * resource-hosted {@link #prmUrl()}.
+     *
+     * <p>Adapters emit this rather than {@link #prmUrl()}, so the two RFC 9728 topologies are one
+     * decision made once per resource: the document is hosted by this resource server at {@link
+     * #prmPath()} (the default), or it is hosted elsewhere — typically by the authorization server,
+     * which publishes one per registered resource — and this server only points at it.
+     *
+     * <p>Either way RFC 9728 §3.3 binds the document that URL returns: its {@code resource} member
+     * must equal the identifier the client derived the request from, byte for byte, or the client
+     * discards the document. The resource registered at the AS, {@link #resourceUri()} and the URL
+     * clients actually call therefore have to be the same string.
+     *
+     * <p><strong>Not header-safe</strong>, for the same reason {@link #prmUrl()} is not: escape it
+     * with {@link ai.authplane.sdk.core.errors.WwwAuthenticate#escapeQuotedString(String)} (as
+     * {@code FailureResponse}/{@code WwwAuthenticate} already do) before interpolating it into a
+     * header value.
+     */
+    public String resourceMetadataUrl() {
+        return resourceMetadataUrl != null ? resourceMetadataUrl : prmUrl();
     }
 
     /**

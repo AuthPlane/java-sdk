@@ -122,7 +122,8 @@ class AuthplaneAuthenticationProviderTest {
 
         assertThatThrownBy(() -> provider.authenticate(request("bad-token")))
                 .isInstanceOf(OAuth2AuthenticationException.class)
-                .hasMessageContaining("issuer mismatch");
+                .hasMessageContaining("The access token is missing or not valid for this resource")
+                .hasMessageNotContaining("issuer mismatch");
     }
 
     @Test
@@ -154,7 +155,7 @@ class AuthplaneAuthenticationProviderTest {
 
         assertThatThrownBy(() -> provider.authenticate(request("bad-token")))
                 .isInstanceOf(OAuth2AuthenticationException.class)
-                .hasMessageContaining("Token validation failed");
+                .hasMessageContaining("The access token is missing or not valid for this resource");
     }
 
     @Test
@@ -173,7 +174,8 @@ class AuthplaneAuthenticationProviderTest {
 
         assertThat(thrown).isNotNull();
         assertThat(thrown.getMessage()).doesNotContain("secret");
-        assertThat(thrown.getError().getDescription()).isEqualTo("Token validation failed");
+        assertThat(thrown.getError().getDescription())
+                .isEqualTo("The access token is missing or not valid for this resource");
         assertThat(thrown.getError().getErrorCode()).isEqualTo("invalid_token");
     }
 
@@ -184,7 +186,8 @@ class AuthplaneAuthenticationProviderTest {
 
         assertThatThrownBy(() -> provider.authenticate(request("direct-fail")))
                 .isInstanceOf(OAuth2AuthenticationException.class)
-                .hasMessageContaining("synchronous failure");
+                .hasMessageContaining("The access token is missing or not valid for this resource")
+                .hasMessageNotContaining("synchronous failure");
     }
 
     @Test
@@ -198,6 +201,7 @@ class AuthplaneAuthenticationProviderTest {
 
         assertThatThrownBy(() -> provider.authenticate(request("bound-token")))
                 .isInstanceOf(OAuth2AuthenticationException.class)
-                .hasMessageContaining("binding mismatch");
+                .hasMessageContaining("The access token is missing or not valid for this resource")
+                .hasMessageNotContaining("binding mismatch");
     }
 }

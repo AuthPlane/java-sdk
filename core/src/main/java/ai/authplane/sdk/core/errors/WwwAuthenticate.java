@@ -1,6 +1,7 @@
 package ai.authplane.sdk.core.errors;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -28,7 +29,8 @@ import ai.authplane.sdk.core.dpop.MultipleDpopProofsException;
  * quoted-string anyway, and letting CR/LF through would allow header injection) and backslash +
  * double-quote escaped.
  *
- * <p>Example output: {@code Bearer error="invalid_token", error_description="Token expired"}
+ * <p>Example output: {@code Bearer error="invalid_token", error_description="The access token is
+ * missing or not valid for this resource"}
  */
 public final class WwwAuthenticate {
 
@@ -75,6 +77,54 @@ public final class WwwAuthenticate {
         public ChallengeOptions withScope(List<String> newScope) {
             return new ChallengeOptions(realm, resourceMetadataUrl, newScope);
         }
+    }
+
+    /**
+     * The {@code error_description} emitted for an error code.
+     *
+     * <p>The challenge and the JSON body are both served to a caller who by definition has not
+     * authenticated, so the description is built from the RFC 6750 §3.1 / RFC 9449 §7.1 error code
+     * and never from the exception's own message. The SDK's messages name the failing detail — the
+     * unknown {@code kid}, the claim that did not validate, the {@code typ} that was rejected — and
+     * an audience mismatch in particular would hand the caller the exact {@code aud} the resource
+     * expects, which is the value they need in order to request a token for it. RFC 6750 §3 does
+     * not require {@code error_description} to be diagnostic: the error code already carries
+     * everything a conforming client needs in order to decide what to do next.
+     *
+     * <p>The descriptions carry no comma, so the same text stays safe to emit as a {@code
+     * WWW-Authenticate} quoted-string, where a comma separates challenge parameters and is what a
+     * lenient client-side parser splits on.
+     */
+    private static final Map<String, String> SAFE_ERROR_DESCRIPTIONS =
+            Map.of(
+                    "invalid_token", "The access token is missing or not valid for this resource",
+                    "insufficient_scope",
+                            "The access token does not carry the scope this operation requires",
+                    "invalid_dpop_proof",
+                            "The DPoP proof is missing or not valid for this request");
+
+    /**
+     * Covers an error code with no entry in {@code SAFE_ERROR_DESCRIPTIONS} — any code added
+     * without a matching row. Kept deliberately contentless for the same reason the table exists.
+     */
+    public static final String FALLBACK_ERROR_DESCRIPTION =
+            "The request could not be authenticated";
+
+    /**
+     * The fixed, caller-safe {@code error_description} for an error code.
+     *
+     * @param errorCode an RFC 6750 §3.1 / RFC 9449 §7.1 error code, as {@link
+     *     #errorCodeFor(AuthplaneException)} returns
+     * @return the sentence to emit for it
+     */
+    public static String descriptionFor(String errorCode) {
+        // SAFE_ERROR_DESCRIPTIONS is a Map.of, whose getOrDefault probes the key's hash and throws
+        // on null. The fallback covers "any code with no matching row", and an adapter deriving a
+        // code from its own mapping may hold none.
+        if (errorCode == null) {
+            return FALLBACK_ERROR_DESCRIPTION;
+        }
+        return SAFE_ERROR_DESCRIPTIONS.getOrDefault(errorCode, FALLBACK_ERROR_DESCRIPTION);
     }
 
     /** C0 control characters (incl. CR/LF) and DEL — illegal in an HTTP header field-value. */
@@ -132,6 +182,25 @@ public final class WwwAuthenticate {
      * @return the header value
      */
     public static String of(AuthplaneException error, ChallengeOptions options) {
+        return of(error, options, false);
+    }
+
+    /**
+     * {@link #of(AuthplaneException, ChallengeOptions)} with {@code verboseDescription} restoring
+     * the exception's own message in {@code error_description}, which is what this builder emitted
+     * before the description became a fixed per-code sentence.
+     *
+     * <p>A development aid. The challenge reaches a caller who has not authenticated and the
+     * message names SDK internals, so do not enable it in production. Scheme, status and error code
+     * are identical either way.
+     *
+     * @param error the SDK exception (must not be null)
+     * @param options optional challenge parameters; use {@link ChallengeOptions#empty()} when none
+     * @param verboseDescription whether to emit the exception message instead of the fixed sentence
+     * @return the header value
+     */
+    public static String of(
+            AuthplaneException error, ChallengeOptions options, boolean verboseDescription) {
         Objects.requireNonNull(error, "error must not be null");
         Objects.requireNonNull(options, "options must not be null");
 
@@ -144,7 +213,11 @@ public final class WwwAuthenticate {
         }
         sb.append("error=\"").append(errorCode).append("\"");
         sb.append(", error_description=\"")
-                .append(escapeQuotedString(error.getMessage()))
+                .append(
+                        escapeQuotedString(
+                                verboseDescription && error.getMessage() != null
+                                        ? error.getMessage()
+                                        : descriptionFor(errorCode)))
                 .append("\"");
         if (!options.scope().isEmpty()) {
             sb.append(", scope=\"")

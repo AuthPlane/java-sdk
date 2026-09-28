@@ -58,6 +58,9 @@ import io.modelcontextprotocol.common.McpTransportContext;
  * authplane.jwks-refresh-seconds             = 300         # Background JWKS refresh interval
  * authplane.metadata-refresh-seconds         = 3600        # RFC 8414 metadata refresh interval
  * authplane.introspection.enabled            = false       # Enable built-in RFC 7662 token introspection
+ * authplane.resource-metadata-url            =             # PRM URL to advertise (default: derived, resource-hosted).
+ *                                                          # No effect on this config's own transport-tier 401/403,
+ *                                                          # which carry no WWW-Authenticate at all — see the guide.
  * authplane.timeout-seconds                  = 0           # HTTP timeout (0 = use SDK default of 10s)
  * authplane.circuit-breaker-threshold        = 0           # Failures before circuit opens (0 = SDK default of 5)
  * authplane.circuit-breaker-cooldown-seconds = 0           # Cooldown before half-open (0 = SDK default of 30s)
@@ -215,6 +218,7 @@ public class AuthplaneMcpServerConfig {
             @Value("${authplane.allowed-algorithms:RS256,ES256}") List<String> allowedAlgorithms,
             @Value("${authplane.clock-skew-seconds:30}") int clockSkewSeconds,
             @Value("${authplane.introspection.enabled:false}") boolean introspectionEnabled,
+            @Value("${authplane.resource-metadata-url:}") String resourceMetadataUrl,
             ObjectProvider<RevocationChecker> revocationCheckerProvider,
             ObjectProvider<InboundDPoPOptions> inboundDPoPProvider) {
 
@@ -235,6 +239,13 @@ public class AuthplaneMcpServerConfig {
         InboundDPoPOptions inboundDPoP = inboundDPoPProvider.getIfAvailable();
         if (inboundDPoP != null) {
             optBuilder.inboundDPoP(inboundDPoP);
+        }
+
+        // Unset (the default) leaves the challenge advertising the resource-hosted document this
+        // config serves itself; set it to the AS-hosted copy when this server cannot serve the
+        // well-known path. A malformed value fails here, at context startup.
+        if (!resourceMetadataUrl.isBlank()) {
+            optBuilder.resourceMetadataUrl(resourceMetadataUrl);
         }
 
         return client.resource(resource, scopes, optBuilder.build());

@@ -94,6 +94,95 @@ class ResourceOptionsTest {
     }
 
     // -----------------------------------------------------------------------
+    // resourceMetadataUrl — the advertised PRM URL override
+    // -----------------------------------------------------------------------
+
+    @Test
+    void defaults_resourceMetadataUrlIsNull() {
+        // null is what makes AuthplaneResource.resourceMetadataUrl() fall back to the derived,
+        // resource-hosted URL — the default topology.
+        assertThat(ResourceOptions.defaults().resourceMetadataUrl()).isNull();
+    }
+
+    @Test
+    void builder_resourceMetadataUrl_customized() {
+        ResourceOptions opts =
+                ResourceOptions.builder()
+                        .resourceMetadataUrl(
+                                "https://auth.example.com/.well-known/oauth-protected-resource/mcp")
+                        .build();
+        assertThat(opts.resourceMetadataUrl())
+                .isEqualTo("https://auth.example.com/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
+    void builder_resourceMetadataUrl_relativeReference_throwsIllegalArgument() {
+        // The value is spliced into a header that reaches unauthenticated clients; a relative
+        // reference names no document they can fetch.
+        assertThatThrownBy(
+                        () ->
+                                ResourceOptions.builder()
+                                        .resourceMetadataUrl(
+                                                "/.well-known/oauth-protected-resource/mcp"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("it has no scheme");
+    }
+
+    @Test
+    void builder_resourceMetadataUrl_nonHttpScheme_throwsIllegalArgument() {
+        assertThatThrownBy(() -> ResourceOptions.builder().resourceMetadataUrl("urn:example:prm"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not http or https");
+    }
+
+    @Test
+    void builder_resourceMetadataUrl_noHost_throwsIllegalArgument() {
+        assertThatThrownBy(
+                        () ->
+                                ResourceOptions.builder()
+                                        .resourceMetadataUrl(
+                                                "https:///.well-known/oauth-protected-resource"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("it names no host");
+    }
+
+    @Test
+    void builder_resourceMetadataUrl_userinfo_throwsIllegalArgumentAndElidesTheCredential() {
+        // URI.getHost() is "auth.example.com" for this shape, so the host gate alone lets it
+        // through — and the value is then advertised in every 401 and 403 to unauthenticated
+        // callers, which is exactly what the identifier's own userinfo gate exists to stop.
+        assertThatThrownBy(
+                        () ->
+                                ResourceOptions.builder()
+                                        .resourceMetadataUrl(
+                                                "https://svc:s3cr3t@auth.example.com/.well-known/oauth-protected-resource/mcp"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("resourceMetadataUrl")
+                .hasMessageContaining("userinfo")
+                .hasMessageNotContaining("s3cr3t");
+    }
+
+    @Test
+    void builder_resourceMetadataUrl_fragment_throwsIllegalArgument() {
+        // A fragment is never sent to the server, so it names a document the client fetches
+        // without it — the advertised URL and the one retrieved disagree.
+        assertThatThrownBy(
+                        () ->
+                                ResourceOptions.builder()
+                                        .resourceMetadataUrl(
+                                                "https://auth.example.com/.well-known/oauth-protected-resource/mcp#frag"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("resourceMetadataUrl")
+                .hasMessageContaining("fragment");
+    }
+
+    @Test
+    void builder_resourceMetadataUrl_null_throwsNpe() {
+        assertThatThrownBy(() -> ResourceOptions.builder().resourceMetadataUrl(null))
+                .isInstanceOf(NullPointerException.class);
+    }
+
+    // -----------------------------------------------------------------------
     // allowedAlgorithms is immutable
     // -----------------------------------------------------------------------
 

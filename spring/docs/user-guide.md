@@ -172,6 +172,7 @@ Both paths use the same `application.properties` keys:
 | `authplane.jwks-refresh-seconds` | `300` | JWKS cache TTL |
 | `authplane.metadata-refresh-seconds` | `3600` | AS metadata cache TTL |
 | `authplane.introspection.enabled` | `false` | Enable built-in RFC 7662 token introspection |
+| `authplane.resource-metadata-url` | derived | URL advertised in the `resource_metadata` challenge parameter; unset means the resource-hosted document this config serves (see [PRM](#protected-resource-metadata-prm)) |
 | `authplane.timeout-seconds` | `0` (SDK default: 10s) | HTTP request timeout |
 | `authplane.circuit-breaker-threshold` | `0` (SDK default: 5) | Failures before the circuit breaker opens |
 | `authplane.circuit-breaker-cooldown-seconds` | `0` (SDK default: 30s) | Cooldown before the circuit breaker transitions to half-open |
@@ -350,6 +351,27 @@ No additional configuration is needed; PRM is served automatically.
 
 **Path A note**: The config bypasses Spring Security's built-in PRM filter (which produces an incomplete document) and serves the correct RFC 9728 document via a Spring MVC `RouterFunction`.
 
+### Where the PRM document lives
+
+Two topologies, one property:
+
+| Topology | Who serves the document | What points at it |
+|---|---|---|
+| Resource-hosted (default) | This application, at `/.well-known/oauth-protected-resource[/path]` | The derived URL, advertised automatically |
+| AS-hosted | The authorization server, which publishes one document per registered resource (authserver 0.2.0 and later serves `<issuer>/.well-known/oauth-protected-resource/{ref}`, `ref` being the RFC 9728 §3.1 path suffix of the resource URI, or its slug) | `authplane.resource-metadata-url` |
+
+```properties
+authplane.issuer=https://auth.company.com
+authplane.resource=https://mcp.company.com/mcp
+authplane.resource-metadata-url=https://auth.company.com/.well-known/oauth-protected-resource/mcp
+```
+
+Every challenge Path A renders carries the configured URL — the 401 for a missing, malformed or invalid token, the DPoP challenges, and the 403 `insufficient_scope`. A value that is not an absolute `http(s)` URL naming a host fails at context startup, and `http` is refused outright for an `https` resource. Setting the property does not unregister the PRM endpoint: the application still serves its own document unless you exclude that bean, which is harmless as long as both documents carry the same `resource` member.
+
+Reach for the AS-hosted topology when the application cannot serve well-known paths — a platform or gateway that owns them. RFC 9728 §3.3 binds either one to the identifier: the `resource` member the client reads must equal, byte for byte, the identifier it derived the metadata request from, so the resource registered at the authorization server, `authplane.resource` and the URL clients actually call all have to be the same string.
+
+**Path B note**: the MCP transport hooks reject through `ServerTransportSecurityException(int statusCode, String message)`, which carries no headers, so those 401/403 responses have no `WWW-Authenticate` header and no `resource_metadata` parameter on either topology — see [Known Limitations](#known-limitations-transport-path).
+
 ## Token Revocation Checking
 
 By default, tokens are validated offline (signature + claims only). You can enable revocation checking to catch tokens that have been revoked before they expire.
@@ -372,7 +394,8 @@ authplane.resource=https://mcp.company.com/mcp
 authplane.introspection.enabled=true
 ```
 
-Authenticated introspection requires client credentials. The SDK reads these from an
+Introspection requires client credentials: authserver ≥ 0.1.2 answers `{"active": false}` to an
+unauthenticated call, which would reject every token as revoked. The SDK reads them from an
 `AuthProvider` bean (not from properties):
 
 ```java
@@ -389,7 +412,8 @@ public AuthProvider authProvider() {
 - The introspection endpoint is automatically discovered from AS metadata.
 - If the endpoint returns `active=false`, the token is rejected.
 - **Fails open**: if the introspection endpoint is unavailable, the token is accepted (offline validation still applies).
-- The `AuthProvider` bean enables authenticated introspection (recommended for production).
+- The `AuthProvider` bean is required in practice: the client must be confidential (a public client cannot introspect at all) and must be either the client the token was issued to or a runtime-client of the Resource named in `aud`. Register it with `authserver admin resource runtime-client add --client-id <rs-client-id> --slug <resource-slug>`.
+- Without the bean the checker logs a warning at startup; it also warns once when `active=false` comes back for a token that already passed local JWT verification.
 
 ### Custom Revocation Checker
 
@@ -462,6 +486,26 @@ class MyTools {
 
 The token exchange client inherits SSRF settings and credentials from the original configuration.
 
+### Exchange errors
+
+Besides `ConsentRequiredException` (see below), `client.exchange(...)` can fail with two sibling subtypes of `TokenExchangeException` that re-prompting the user will not fix:
+
+- `ai.authplane.sdk.core.errors.AccessDeniedException` (`access_denied`, HTTP 403): on a cross-client exchange, the operator has not allowlisted this client on the target Resource. Fix the Resource policy (next step). Import it by its full name: the simple name collides with Spring Security's `org.springframework.security.access.AccessDeniedException`, which this adapter also throws, and catching the wrong one compiles and catches nothing.
+- `InvalidTargetException` (`invalid_target`, HTTP 400, RFC 8707 §2.2): the `resource` string does not match a granted resource exactly — a trailing slash is enough. Send the identifier byte for byte as granted.
+
+None of the three trips the circuit breaker.
+
+### Operator step: allowlist the exchanging client
+
+For each MCP server that exchanges for a downstream resource it does not itself act as, allowlist its client ID on that Resource:
+
+```http
+PATCH /admin/resources/{id}
+{"policy": {"exchange": {"allowed_client_ids": ["<exchanging-client-id>"]}}}
+```
+
+A client exchanging a token issued to itself, fronted exchanges, and Broker resources need nothing.
+
 ## URL Elicitation (No Equivalent)
 
 The `authplane-mcp` adapter ships a `UrlElicitationSupport.wrapToolWithUrlElicitation(...)` helper that translates `consent_required` / `interaction_required` token-exchange errors into MCP JSON-RPC URL elicitation responses (error code `-32042`). **There is no Spring-adapter equivalent.**
@@ -498,6 +542,8 @@ The MCP Java SDK splits transport-level auth into two hooks with different capab
 
 1. **`validateHeaders(Map<String, List<String>>)`** — receives only headers. Can return proper HTTP status codes via `ServerTransportSecurityException` (401/403).
 2. **`extract(ServerRequest)`** — receives the full request (method, URL, headers). Exceptions bubble as unhandled 500s; there is no mechanism to return a structured HTTP error.
+
+The rejection `validateHeaders` can produce is `ServerTransportSecurityException(int statusCode, String message)`, which carries a status and a message and nothing else: the transport-tier 401/403 responses have no `WWW-Authenticate` header, and therefore no `resource_metadata` parameter, whether the PRM document is resource-hosted or AS-hosted. Path A is where the full RFC 6750 / RFC 9728 challenge is emitted.
 
 This produces two observable consequences:
 

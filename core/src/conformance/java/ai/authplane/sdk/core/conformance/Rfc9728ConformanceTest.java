@@ -202,11 +202,21 @@ class Rfc9728ConformanceTest extends AbstractPlaceholderConformanceTest {
                             + " scheme but no authority still constructs and throws later, on the"
                             + " 401 challenge path, which is the shape of failure moving these"
                             + " gates to construction was meant to remove.")
-    void rfc9728_resource_identifier_must_be_an_absolute_url_with_scheme_and_host() {
+    void rfc9728_resource_identifier_must_be_an_absolute_url_with_scheme_and_host()
+            throws Exception {
+        // resource.create is the operation the catalog names as the stimulus, so drive the factory
+        // itself and not only the gate it delegates to. Asserting requireScheme alone would keep
+        // passing if the gate stayed intact but stopped being wired into construction, which is
+        // the regression this case exists to catch.
+        AuthplaneClient client = ConformanceTestSupport.buildClient(baseUrl);
+
         // Each value rejects on its own — the case is explicit that rejecting one does not satisfy
         // it, because a guard that only asks "opaque or authority-less?" catches "/mcp" while
         // letting the scheme-relative form through.
         for (String identifier : List.of("/mcp", "//api.example.com/mcp")) {
+            assertThatThrownBy(() -> client.resource(identifier, List.of("read:data")))
+                    .isInstanceOf(IllegalArgumentException.class);
+
             assertThatThrownBy(() -> ProtectedResourceMetadata.requireScheme(identifier))
                     .isInstanceOf(IllegalArgumentException.class);
 

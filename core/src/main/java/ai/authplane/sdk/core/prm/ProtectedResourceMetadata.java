@@ -186,10 +186,10 @@ public final class ProtectedResourceMetadata {
         // the host and "the path and/or query components, if any"). Raw form, so the encoding is
         // exactly what the operator configured. An empty query (a bare trailing '?', for which
         // getRawQuery() returns "") is treated as absent: RFC 3986 would allow reading it as
-        // present-but-empty, but on *this* sub-case — an empty query — the family agrees on the
-        // query-less URL, and parity wins over that reading. It is only the empty-query reading
-        // that is settled: for a non-empty query the implementations still differ, which is
-        // tracked in #32 rather than asserted here.
+        // present-but-empty, but a bare '?' names no parameter, so both readings derive a URL that
+        // addresses the same document and the query-less form is the one that survives ordinary
+        // normalisation. Only the empty-query case is decided here; a non-empty query is tracked
+        // in AuthPlane/java-sdk#32 rather than asserted.
         String query = uri.getRawQuery();
         return query == null || query.isEmpty() ? url : url + "?" + query;
     }
@@ -378,9 +378,12 @@ public final class ProtectedResourceMetadata {
      * null://api.example.com/mcp} and every DPoP-bound request fails with a mismatch that names
      * nothing an operator can act on.
      *
-     * <p>Only the scheme is required here. The identifier may still be any absolute URI RFC 8707 §2
-     * permits — {@code urn:example:api} constructs; whether it can derive a PRM URL is the
-     * derivation gate's question, answered when a derivation is actually asked for.
+     * <p>The scheme is only half of the requirement. {@link #requireAuthority(String)} runs
+     * immediately after and requires the identifier to name a host, for the same reason and against
+     * the same sink: an identifier with no authority splices the literal text {@code "null"} into
+     * the {@code htu} exactly as a missing scheme does. The two stay separate gates so that each
+     * message names the half the identifier actually fails — an operator who wrote {@code
+     * urn:example:api} is not helped by being told the scheme is missing.
      *
      * <p>Works on the raw string, like the sibling gates: a scheme is present exactly when a {@code
      * :} appears before any {@code /}, {@code ?} or {@code #} and the text before it matches the
@@ -388,8 +391,8 @@ public final class ProtectedResourceMetadata {
      *
      * <p>Called from the same construction boundaries as the sibling gates: {@link
      * Builder#build()}, the {@code AuthplaneResource} constructor, and {@code
-     * AuthplaneClient.resource(...)}. The derivation-time {@code requireDerivable} stays as the
-     * backstop for the public derivation helpers.
+     * AuthplaneClient.resource(...)}. The derivation-time {@link #requireDerivable(URI)} stays as
+     * the backstop for the public derivation helpers.
      *
      * @param resourceUri the resource identifier, as configured by the operator
      * @throws IllegalArgumentException if the identifier does not begin with a URI scheme
@@ -410,6 +413,119 @@ public final class ProtectedResourceMetadata {
                         + " target, both of which would read the missing scheme as the literal"
                         + " text \"null\". Prefix the intended scheme (e.g."
                         + " https://api.example.com/mcp).");
+    }
+
+    /**
+     * Requires the identifier to name a host — the other half of the absolute-hierarchical-URI
+     * requirement, gated at construction beside {@link #requireScheme(String)}.
+     *
+     * <p>An identifier with no authority clears every other gate and is then unusable at the sink
+     * that matters most. {@code AuthplaneResource.normalizeRequestUrl} builds the DPoP {@code htu}
+     * binding target as {@code scheme + "://" + rawAuthority + requestPath}, and {@link
+     * URI#getRawAuthority()} is {@code null} for an identifier that has no authority — so {@code
+     * urn:example:api} binds every request to an origin of literally {@code urn://null} (measured
+     * through the constructor, not inferred). No client proof can match that, so every DPoP-bound
+     * request against such a resource fails an {@code htu} mismatch naming a host that does not
+     * exist and that nothing in the operator's configuration mentions. That is verbatim the failure
+     * mode {@link #requireScheme(String)} exists to close — a missing component read as the literal
+     * text {@code "null"} — and the authority is its other half. An identifier that is accepted and
+     * then cannot carry a DPoP-bound request has not been accepted in any useful sense.
+     *
+     * <p>The requirement is not RFC 8707 §2's, and citing it here would be citing the wrong axis:
+     * §2 governs the {@code resource} parameter of a token request and permits any absolute URI,
+     * which is a different thing from the identifier a resource server is configured with. The
+     * applicable clause is RFC 9728 §3, which forms the metadata URL by inserting the well-known
+     * string "between the host component and the path and/or query components" — there has to be a
+     * host component to insert after. The counter-argument, that an opaque identifier publishes no
+     * PRM document and so §3 never binds it, is real but does not survive the {@code htu} sink
+     * above: the DPoP binding is derived from the identifier whether or not a document is ever
+     * served.
+     *
+     * <p>Works on the raw string like the sibling gates, reusing the same {@code authorityBounds}
+     * the userinfo gate reads so that the two can never disagree about where the authority is. An
+     * empty authority ({@code https:///mcp}) and an authority carrying only a port ({@code
+     * https://:8443/mcp}) name no host and are rejected: the first derives the same literal {@code
+     * "null"} the opaque case does, the second an origin no client addresses. A host with a port
+     * ({@code https://api.example.com:8443/mcp}), an IPv6 literal ({@code https://[::1]:8443/mcp})
+     * and a plain host all pass.
+     *
+     * <p>A scheme-relative reference ({@code //api.example.com/mcp}) does name a host and passes
+     * this gate; {@link #requireScheme(String)}, which runs immediately before it at every call
+     * site, is what rejects that shape. Each gate answers exactly one question, so the message an
+     * operator gets names the half that is actually missing.
+     *
+     * <p>Called from the three construction boundaries the sibling gates are called from: {@link
+     * Builder#build()}, the {@code AuthplaneResource} constructor, and {@code
+     * AuthplaneClient.resource(...)}. {@link #wellKnownUrl(String)} deliberately does not call it:
+     * {@link #requireDerivable(URI)} already answers the same question there, and answers it in the
+     * wording a derivation caller needs.
+     *
+     * @param resourceUri the resource identifier, as configured by the operator
+     * @throws IllegalArgumentException if the identifier has no authority component, or its
+     *     authority names no host
+     */
+    public static void requireAuthority(String resourceUri) {
+        Objects.requireNonNull(resourceUri, "resourceUri must not be null");
+        // Cut the fragment first, like the sibling gates: a '/' or '@' after a '#' belongs to the
+        // fragment, not the authority. requireNoFragment has already rejected any '#' at every call
+        // site, but this method is public and answers its own question.
+        int fragmentStart = resourceUri.indexOf('#');
+        String beforeFragment =
+                fragmentStart < 0 ? resourceUri : resourceUri.substring(0, fragmentStart);
+        int[] authority = authorityBounds(beforeFragment);
+
+        // Name the requirement this identifier actually fails, for the reason requireDerivable
+        // names its own: "urn:example:api" and "https://:8443/mcp" fail different halves, and a
+        // message covering both points the operator at the wrong one.
+        String defect;
+        if (authority == null) {
+            defect = "it has no authority component (no \"//\" follows the scheme)";
+        } else if (!namesHost(beforeFragment, authority[0], authority[1])) {
+            defect = "its authority names no host";
+        } else {
+            return;
+        }
+        throw new IllegalArgumentException(
+                "Resource identifier \""
+                        + elideSecrets(resourceUri)
+                        + "\" (fragment and any userinfo elided) does not name a host: "
+                        + defect
+                        + ". Both sinks that reassemble the identifier are built from its"
+                        + " authority. The DPoP htu binding target splices the scheme, the"
+                        + " authority and the request path, so an absent authority reads as the"
+                        + " literal text \"null\" — \"urn:example:api\" binds every request to"
+                        + " \"urn://null\", which no client proof can match — and RFC 9728 §3"
+                        + " derives the Protected Resource Metadata URL by inserting the well-known"
+                        + " string between the host component and the path, which needs a host to"
+                        + " insert after. Configure the absolute URL clients address this resource"
+                        + " by (e.g. https://api.example.com/mcp).");
+    }
+
+    /**
+     * Whether the authority delimited by {@code [start, end)} names a non-empty host.
+     *
+     * <p>The host is what remains of the authority once the userinfo and the port are removed (RFC
+     * 3986 §3.2): everything after the last {@code @} within the authority, up to the {@code :}
+     * that opens the port. An IPv6 literal is bracketed (§3.2.2) and its own colons sit inside the
+     * brackets, so the port separator is looked for after the closing {@code ]} rather than from
+     * the start — otherwise {@code [::1]:8443} would be read as an empty host.
+     *
+     * <p>Userinfo is skipped rather than rejected here: {@link #requireNoUserinfo(String)} owns
+     * that question, and this helper must still give the right answer for {@code
+     * https://svc:pw@/mcp}, whichever gate the caller happens to reach first.
+     */
+    private static boolean namesHost(String beforeFragment, int start, int end) {
+        int userInfoEnd = beforeFragment.lastIndexOf('@', end - 1);
+        int hostStart = userInfoEnd < start ? start : userInfoEnd + 1;
+        int hostEnd = end;
+        if (hostStart < end && beforeFragment.charAt(hostStart) == '[') {
+            int close = beforeFragment.indexOf(']', hostStart);
+            hostEnd = close < 0 || close >= end ? end : close + 1;
+        } else {
+            int portColon = beforeFragment.indexOf(':', hostStart);
+            hostEnd = portColon < 0 || portColon >= end ? end : portColon;
+        }
+        return hostEnd > hostStart;
     }
 
     /**
@@ -438,15 +554,16 @@ public final class ProtectedResourceMetadata {
      *
      * <p>Called from the same construction boundaries as the sibling gates — {@link
      * Builder#build()}, the {@code AuthplaneResource} constructor, and {@code
-     * AuthplaneClient.resource(...)} — after {@link #requireScheme(String)}, so an identifier that
-     * is also scheme-relative is reported for the missing scheme, the defect an operator fixes
-     * first.
+     * AuthplaneClient.resource(...)} — and last of the five, after {@link #requireScheme(String)}
+     * and {@link #requireAuthority(String)}, so an identifier that is also scheme-relative or
+     * hostless is reported for that, the defect an operator fixes first.
      *
-     * <p>The four gates run in the same *set* everywhere but not in the same *order*: the three
-     * construction sites run fragment, query, scheme, userinfo, while {@link #wellKnownUrl(String)}
-     * runs fragment, scheme, userinfo, query. So an identifier that violates two of them can be
-     * reported for a different component depending on the entrypoint. Both reject either way; only
-     * the message differs. Unifying the four behind one private gate is tracked in #33.
+     * <p>The gates run in the same *set* everywhere but not in the same *order*: the three
+     * construction sites run fragment, query, scheme, authority, userinfo, while {@link
+     * #wellKnownUrl(String)} runs fragment, scheme, userinfo, query and leaves the authority to
+     * {@link #requireDerivable(URI)}. So an identifier that violates two of them can be reported
+     * for a different component depending on the entrypoint. Both reject either way; only the
+     * message differs. Unifying them behind one private gate is tracked in AuthPlane/java-sdk#33.
      *
      * @param resourceUri the resource identifier, as configured by the operator
      * @throws IllegalArgumentException if the identifier's authority carries a userinfo component
@@ -648,11 +765,13 @@ public final class ProtectedResourceMetadata {
     /**
      * Guards the PRM derivation helpers against identifiers they cannot derive from.
      *
-     * <p>RFC 8707 §2 permits a resource indicator that is any absolute URI, and this class stores
-     * whatever it is given verbatim — {@code urn:example:api} is a valid resource identifier. But
-     * an opaque URI has no authority and no hierarchical path, so there is no PRM URL to publish
-     * for it: the derivation would otherwise emit {@code urn://null/.well-known/...} and hand that
-     * to the {@code resource_metadata} parameter of the 401 challenge.
+     * <p>RFC 8707 §2 permits a resource indicator that is any absolute URI, which is the reading
+     * under which {@code urn:example:api} used to reach this helper at all. An opaque URI has no
+     * authority and no hierarchical path, so there is no PRM URL to publish for it: the derivation
+     * would otherwise emit {@code urn://null/.well-known/...} and hand that to the {@code
+     * resource_metadata} parameter of the 401 challenge. {@link #requireAuthority(String)} now
+     * refuses such an identifier at construction, so this is what remains for the callers that
+     * never construct anything.
      *
      * <p>The scheme is gated for the same reason, and needs its own test: a scheme-relative
      * reference such as {@code //api.example.com/mcp} is neither opaque nor authority-less, so it
@@ -660,6 +779,24 @@ public final class ProtectedResourceMetadata {
      * null://api.example.com/.well-known/oauth-protected-resource/mcp} into that same challenge
      * parameter. RFC 8707 §2 requires the resource indicator to be an absolute URI, and RFC 3986
      * §4.3 defines one as always carrying a scheme, so no legitimate identifier is turned away.
+     *
+     * <p>What is left of its job now that {@link #requireScheme(String)} and {@link
+     * #requireAuthority(String)} gate the same three components at construction: this is no longer
+     * reachable from a constructed resource — {@code AuthplaneResource.prmUrl()} cannot arrive here
+     * with a defective identifier, because no such identifier constructs — but {@link
+     * #wellKnownPath(URI)} is public and is the one entry point in this class that takes an already
+     * parsed {@link URI} rather than a raw string, so for those callers this is the only gate there
+     * is. It is also what keeps {@link #wellKnownUrl(String)} from needing an authority gate of its
+     * own: the question is the same, and the wording a derivation caller needs is not the wording a
+     * constructor argument needs. Deleting it on the grounds that construction now covers the SDK's
+     * own paths would leave an external caller deriving {@code urn://null/.well-known/...} and
+     * handing that to the {@code resource_metadata} parameter of a 401 challenge — precisely the
+     * output this check was written to prevent.
+     *
+     * <p>The accepted narrowing is that none of its three branches is reachable from inside this
+     * SDK any more: every internal caller now arrives with an identifier the construction gates
+     * have already cleared. They stay because this helper serves a public entry point and has to
+     * answer for itself.
      */
     private static void requireDerivable(URI resourceUri) {
         // Name the requirement this identifier actually fails — a generic both-requirements
@@ -681,9 +818,10 @@ public final class ProtectedResourceMetadata {
                         + "\" (any userinfo elided): "
                         + defect
                         + ". PRM derivation requires a hierarchical resource identifier with a"
-                        + " scheme and an authority (e.g. https://api.example.com/mcp). The"
-                        + " resource identifier itself may be any absolute URI permitted by RFC"
-                        + " 8707 §2 and is stored verbatim; only the derivation is restricted.");
+                        + " scheme and an authority (e.g. https://api.example.com/mcp). A resource"
+                        + " identifier configured through this SDK is held to the same requirement"
+                        + " at construction, so this message reaches only a caller of the public"
+                        + " derivation helpers.");
     }
 
     // -----------------------------------------------------------------------
@@ -781,6 +919,7 @@ public final class ProtectedResourceMetadata {
             requireNoFragment(resource);
             requireValidQuery(resource);
             requireScheme(resource);
+            requireAuthority(resource);
             requireNoUserinfo(resource);
 
             return new ProtectedResourceMetadata(

@@ -231,6 +231,7 @@ class AuthplaneSecurityConfigTest {
                         List.of("RS256"),
                         30,
                         false,
+                        "", // resourceMetadataUrl (unset → derived, resource-hosted)
                         revocationCheckerProvider,
                         inboundDPoPProvider);
 
@@ -247,6 +248,82 @@ class AuthplaneSecurityConfigTest {
     }
 
     @Test
+    void resourceMetadataUrlProperty_isAdvertisedInsteadOfTheDerivedUrl() throws Exception {
+        // authplane.resource-metadata-url configured: the whole path from the property to the
+        // header, through the real resource and the real entry point. The AS hosts the document
+        // (authserver >= 0.2.0 serves one per registered resource); this server only points at it.
+        String asHosted = baseUrl + "/.well-known/oauth-protected-resource/mcp";
+        AuthplaneResource v =
+                config.authplaneResource(
+                        buildClient(0),
+                        baseUrl + "/mcp",
+                        List.of("tools/add"),
+                        List.of("RS256"),
+                        30,
+                        false,
+                        asHosted,
+                        revocationCheckerProvider,
+                        inboundDPoPProvider);
+
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        new AuthplaneAuthenticationEntryPoint(v)
+                .commence(new MockHttpServletRequest("GET", "/mcp"), response, null);
+
+        assertThat(response.getStatus()).isEqualTo(401);
+        assertThat(response.getHeader("WWW-Authenticate"))
+                .contains("resource_metadata=\"" + asHosted + "\"");
+        // The document still has a resource-hosted address; only what is advertised changed.
+        assertThat(v.prmPath()).isEqualTo("/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
+    void resourceMetadataUrlProperty_unset_keepsTheDerivedChallengeUnchanged() throws Exception {
+        // The default: no property, no behaviour change — the challenge advertises the document
+        // this config serves itself.
+        AuthplaneResource v =
+                config.authplaneResource(
+                        buildClient(0),
+                        baseUrl + "/mcp",
+                        List.of("tools/add"),
+                        List.of("RS256"),
+                        30,
+                        false,
+                        "",
+                        revocationCheckerProvider,
+                        inboundDPoPProvider);
+
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        new AuthplaneAuthenticationEntryPoint(v)
+                .commence(new MockHttpServletRequest("GET", "/mcp"), response, null);
+
+        assertThat(response.getHeader("WWW-Authenticate"))
+                .contains(
+                        "resource_metadata=\""
+                                + baseUrl
+                                + "/.well-known/oauth-protected-resource/mcp\"");
+    }
+
+    @Test
+    void resourceMetadataUrlProperty_relativeValue_failsAtContextStartup() {
+        // A relative value would be advertised verbatim to unauthenticated clients, which cannot
+        // resolve it. Like the invalid query above, it fails where the operator wrote it.
+        assertThatThrownBy(
+                        () ->
+                                config.authplaneResource(
+                                        buildClient(0),
+                                        baseUrl + "/mcp",
+                                        List.of("tools/add"),
+                                        List.of("RS256"),
+                                        30,
+                                        false,
+                                        "/.well-known/oauth-protected-resource/mcp",
+                                        revocationCheckerProvider,
+                                        inboundDPoPProvider))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("resourceMetadataUrl");
+    }
+
+    @Test
     void authplaneResource_queryOutsideTheRfc3986Grammar_failsAtContextStartup() {
         // A query octet the §3.4 grammar does not admit used to construct cleanly and then throw
         // out of prmUrl() inside commence() — a 500 in place of the 401. It now fails where the
@@ -260,6 +337,8 @@ class AuthplaneSecurityConfigTest {
                                         List.of("RS256"),
                                         30,
                                         false,
+                                        "", // resourceMetadataUrl (unset → derived,
+                                        // resource-hosted)
                                         revocationCheckerProvider,
                                         inboundDPoPProvider))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -282,6 +361,8 @@ class AuthplaneSecurityConfigTest {
                                         List.of("RS256"),
                                         30,
                                         false,
+                                        "", // resourceMetadataUrl (unset → derived,
+                                        // resource-hosted)
                                         revocationCheckerProvider,
                                         inboundDPoPProvider))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -439,6 +520,7 @@ class AuthplaneSecurityConfigTest {
                         List.of("RS256"),
                         30,
                         false,
+                        "", // resourceMetadataUrl (unset → derived, resource-hosted)
                         revocationCheckerProvider,
                         inboundDPoPProvider);
 
@@ -465,6 +547,8 @@ class AuthplaneSecurityConfigTest {
                                         List.of("RS256"),
                                         30,
                                         false,
+                                        "", // resourceMetadataUrl (unset → derived,
+                                        // resource-hosted)
                                         revocationCheckerProvider,
                                         inboundDPoPProvider))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -502,6 +586,7 @@ class AuthplaneSecurityConfigTest {
                 List.of("RS256"),
                 30, // clockSkewSeconds
                 introspectionEnabled,
+                "", // resourceMetadataUrl (unset → derived, resource-hosted)
                 revocationCheckerProvider,
                 inboundDPoPProvider);
     }

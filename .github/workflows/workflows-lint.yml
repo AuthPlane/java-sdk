@@ -2,23 +2,44 @@ name: Lint workflows
 
 # Catches workflow YAML / shell-in-`run:` regressions at PR time so a
 # typo can't reach a release tag and surface only when a publish run
-# fails. Scoped to changes under `.github/workflows/**` to keep CI
-# overhead off unrelated PRs.
+# fails. The shell scripts under scripts/ are in the same category — a
+# break in them surfaces only when someone reaches for them after a
+# release, which is the worst moment to discover it — so they are
+# shellchecked and, where they have a suite, tested here too.
+#
+# `.github/scripts/*.sh` is in scope for the same reason. Those scripts
+# serve the weekly conformance drift workflow, so a break in them surfaces
+# late and quietly — and the way it surfaces is a green run, because what
+# they guard against is a check that under-reports. Shellcheck alone would
+# not have been enough for them, so they carry their own tests here as
+# well, next to backport-fixes.test.sh.
+#
+# Scoped to `.github/workflows/**`, `.github/scripts/*.sh` and
+# `scripts/*.sh` to keep CI overhead off unrelated PRs.
 
 on:
   pull_request:
     paths:
       - ".github/workflows/**"
+      - ".github/scripts/*.sh"
+      - "scripts/*.sh"
   push:
     branches:
       - main
     paths:
       - ".github/workflows/**"
+      - ".github/scripts/*.sh"
+      - "scripts/*.sh"
 
 permissions:
   contents: read
 
 jobs:
+  # This job runs actionlint, shellcheck and the backport-fixes suite — the id
+  # is narrower than the work. Do not rename it: the required status check is
+  # named after the job id, exactly as the branch protection rule depends on
+  # the workflow `name:` above. Renaming either silently drops the check from
+  # the required set. Add steps here instead.
   actionlint:
     runs-on: ubuntu-latest
     steps:
@@ -62,3 +83,31 @@ jobs:
       # job fails loudly instead of silently degrading.
       - name: Run actionlint
         run: actionlint -color -shellcheck=shellcheck
+
+      # actionlint only reaches shell inside `run:` blocks. The scripts
+      # those blocks invoke need shellcheck run against them directly.
+      - name: Shellcheck the repo scripts
+        run: shellcheck scripts/*.sh
+
+      # backport-fixes.sh resolves --from as a branch or a tag against
+      # origin, and its failure modes (a fetch that fails for a reason
+      # other than "no such ref") are only reachable with a real remote.
+      # The suite builds throwaway repos in a temp dir — no network.
+      - name: Test backport-fixes.sh
+        run: scripts/backport-fixes.test.sh
+
+      # The scripts the drift workflow invokes. Same argument as the repo
+      # scripts above: actionlint only reaches shell inside `run:` blocks.
+      - name: Shellcheck the workflow support scripts
+        run: shellcheck .github/scripts/*.sh
+
+      # Shellcheck is the only other gate on the conformance drift scripts,
+      # and it cannot see the way they break: a loosened id regex that drops
+      # cases, or a `diff` whose exit code stops being read, is valid shell.
+      # The result is a check that reports green while guarding nothing, on a
+      # weekly schedule where nobody is watching — and it would stay unnoticed
+      # until a real re-tightening slipped through, which is the failure that
+      # check exists to prevent. These controls pin the detection itself. They
+      # need neither Maven nor the catalog checkout, so they run here.
+      - name: Test conformance-case-body-drift.sh
+        run: .github/scripts/conformance-case-body-drift.test.sh

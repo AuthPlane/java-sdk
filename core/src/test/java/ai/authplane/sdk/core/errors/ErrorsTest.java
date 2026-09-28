@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import ai.authplane.sdk.core.dpop.DPoPNotSupportedException;
 import ai.authplane.sdk.core.dpop.DPoPProofMissingException;
 import ai.authplane.sdk.core.dpop.MultipleDpopProofsException;
+import ai.authplane.sdk.core.errors.WwwAuthenticate.ChallengeOptions;
 
 /**
  * Tests for the exception hierarchy.
@@ -201,15 +202,18 @@ class ErrorsTest {
 
     @Test
     void wwwAuthenticate_escapesDoubleQuotesInErrorDescription() {
+        // The fixed description carries no quote to escape, so the message path is
+        // exercised through the verbose overload — the one way a caller-influenced
+        // string can still reach error_description.
         var ex = new InvalidClaimsException("bad \"kid\" value");
-        String header = WwwAuthenticate.of(ex);
+        String header = WwwAuthenticate.of(ex, ChallengeOptions.empty(), true);
         assertThat(header).contains("error_description=\"bad \\\"kid\\\" value\"");
     }
 
     @Test
     void wwwAuthenticate_escapesBackslashesInErrorDescription() {
         var ex = new InvalidClaimsException("path\\to\\file");
-        String header = WwwAuthenticate.of(ex);
+        String header = WwwAuthenticate.of(ex, ChallengeOptions.empty(), true);
         assertThat(header).contains("error_description=\"path\\\\to\\\\file\"");
     }
 
@@ -236,7 +240,7 @@ class ErrorsTest {
         // CR/LF cannot appear inside a quoted-string (RFC 9110 §5.6.4); leaving them in would
         // let an attacker inject a follow-on header line.
         var ex = new InvalidClaimsException("line1\r\nSet-Cookie: pwned=1");
-        String header = WwwAuthenticate.of(ex);
+        String header = WwwAuthenticate.of(ex, ChallengeOptions.empty(), true);
         assertThat(header).doesNotContain("\r");
         assertThat(header).doesNotContain("\n");
         assertThat(header).contains("error_description=\"line1Set-Cookie: pwned=1\"");
@@ -456,5 +460,17 @@ class ErrorsTest {
     void httpStatus_unknownAuthplaneException_returns500() {
         AuthplaneException custom = new AuthplaneException(MSG) {};
         assertThat(HttpStatus.of(custom)).isEqualTo(500);
+    }
+
+    @Test
+    void descriptionFor_fallsBackForACodeWithNoRow() {
+        assertThat(WwwAuthenticate.descriptionFor("invalid_token"))
+                .isEqualTo("The access token is missing or not valid for this resource");
+        assertThat(WwwAuthenticate.descriptionFor("insufficient_scope"))
+                .isEqualTo("The access token does not carry the scope this operation requires");
+        assertThat(WwwAuthenticate.descriptionFor("invalid_dpop_proof"))
+                .isEqualTo("The DPoP proof is missing or not valid for this request");
+        assertThat(WwwAuthenticate.descriptionFor("something_new"))
+                .isEqualTo(WwwAuthenticate.FALLBACK_ERROR_DESCRIPTION);
     }
 }
