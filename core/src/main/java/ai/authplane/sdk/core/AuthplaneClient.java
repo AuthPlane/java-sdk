@@ -198,6 +198,9 @@ public class AuthplaneClient implements AutoCloseable {
         ProtectedResourceMetadata.requireValidQuery(resourceUri);
         // RFC 8707 §2: an absolute URI always carries a scheme. Same reason, same boundary.
         ProtectedResourceMetadata.requireScheme(resourceUri);
+        // RFC 9728 §3 derives the metadata URL by inserting the well-known string after the host
+        // component, and the DPoP htu origin is built from the same authority. Same boundary.
+        ProtectedResourceMetadata.requireAuthority(resourceUri);
         // RFC 9110 §4.2.4: no userinfo. The identifier is published to unauthenticated callers
         // verbatim, so a credential in the authority is disclosed. Same reason, same boundary.
         ProtectedResourceMetadata.requireNoUserinfo(resourceUri);

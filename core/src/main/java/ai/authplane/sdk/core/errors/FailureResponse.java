@@ -38,10 +38,37 @@ public final class FailureResponse {
      * @return the status, {@code WWW-Authenticate} header, and JSON body
      */
     public static Challenge of(AuthplaneException error, ChallengeOptions options) {
+        return of(error, options, false);
+    }
+
+    /**
+     * {@link #of(AuthplaneException, ChallengeOptions)} with {@code verboseDescription} restoring
+     * the exception's own message in {@code error_description} — on both the challenge and the
+     * body, which is the point: the two travel in the same response to the same caller, so an
+     * escape hatch that opened only one of them would be a way to think the message was suppressed
+     * while it still shipped.
+     *
+     * <p>A development aid; do not enable it in production.
+     *
+     * @param error the verification/authorization failure
+     * @param options challenge parameters; use {@link ChallengeOptions#empty()} when none
+     * @param verboseDescription whether to emit the exception message instead of the fixed sentence
+     * @return the status, {@code WWW-Authenticate} header, and JSON body
+     */
+    public static Challenge of(
+            AuthplaneException error, ChallengeOptions options, boolean verboseDescription) {
         int status = HttpStatus.of(error);
-        String header = WwwAuthenticate.of(error, options);
+        String header = WwwAuthenticate.of(error, options, verboseDescription);
         String code = WwwAuthenticate.errorCodeFor(error);
-        String description = error.getMessage() != null ? error.getMessage() : code;
+
+        // The body carries the same fixed sentence the challenge does. It used to carry
+        // error.getMessage(), which named the unknown kid, the claim that did not validate, or the
+        // aud the resource expects — to a caller who by definition has not authenticated, and who
+        // reads whichever half of the response it looks at first.
+        String description =
+                verboseDescription && error.getMessage() != null
+                        ? error.getMessage()
+                        : WwwAuthenticate.descriptionFor(code);
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("error", code);

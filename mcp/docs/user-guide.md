@@ -93,6 +93,7 @@ Every builder method on `AuthplaneMcpSetup.Builder`:
 | `tokenCacheConfig(TokenCacheConfig)` | `TokenCacheConfig.defaults()` | Token cache tuning: TTL buffer (default `30`s), fallback TTL (default `3600`s), max entries (default `10000`, LRU) |
 | `outboundDPoP(OutboundDPoPOptions)` | `null` | Enables outbound DPoP proofs on AS calls |
 | `inboundDPoP(InboundDPoPOptions)` | `null` | Enables inbound DPoP proof validation |
+| `resourceMetadataUrl(String)` | derived | Advertises this URL as the PRM document's location instead of the derived, resource-hosted one (see §7) |
 
 Both refresh intervals are driven by traffic rather than by a background timer: the first token verification past the interval pays for the refetch. That is what keeps an MCP server — which never calls the token, introspection or revocation endpoints — following a rotated `jwks_uri`: the metadata read that discovers the new URI rebinds JWKS fetching before the token is verified. A metadata endpoint that is unreachable does not fail verification; the last known good document keeps being served.
 
@@ -161,6 +162,33 @@ setup.prmPath();    // e.g. "/.well-known/oauth-protected-resource/mcp"
 
 The response includes the authorization server issuer, supported scopes, supported bearer methods (`header`), and the resource identifier.
 
+### Where the PRM document lives
+
+Two topologies, one option:
+
+| Topology | Who serves the document | What points at it |
+|---|---|---|
+| Resource-hosted (default) | This server, via the `PrmServlet` registered at `prmPath()` | The derived `<resource origin>/.well-known/oauth-protected-resource[/path]` |
+| AS-hosted | The authorization server, which publishes one document per registered resource (authserver 0.2.0 and later serves `<issuer>/.well-known/oauth-protected-resource/{ref}`, `ref` being the RFC 9728 §3.1 path suffix of the resource URI, or its slug) | `resourceMetadataUrl(...)` on the builder |
+
+```java
+AuthplaneMcpSetup setup = AuthplaneMcpSetup.builder()
+    .issuer("https://auth.example.com")
+    .resource("https://mcp.example.com/mcp")
+    .scopes(List.of("tools/query"))
+    .resourceMetadataUrl("https://auth.example.com/.well-known/oauth-protected-resource/mcp")
+    .build()
+    .get();
+
+setup.resource().resourceMetadataUrl();  // the AS-hosted URL — what challenges advertise
+```
+
+Reach for the AS-hosted topology when this server cannot serve well-known paths — a platform that owns them, or a gateway that routes only the MCP path. `prmPath()` and `prmServlet()` are unaffected; skip `registerServlets(...)`'s PRM mapping (or wire the transport servlet yourself) if you do not want to serve a second copy.
+
+Either way RFC 9728 §3.3 binds the document to the identifier: the `resource` member the client reads must equal, byte for byte, the identifier it derived the metadata request from. The resource registered at the authorization server, the `resource(...)` configured here and the URL clients actually call therefore have to be the same string.
+
+**Transport-tier limitation.** The MCP Java SDK renders this adapter's transport-tier 401/403 through `ServerTransportSecurityException(int statusCode, String message)`, which carries a status and a message and no headers — the SDK passes them to `HttpServletResponse.sendError(...)`. Those responses therefore carry no `WWW-Authenticate` header at all, and so no `resource_metadata` parameter, on either topology (this predates the option and is not changed by it). Clients discover the document from the well-known path, a front proxy adds the header, or the Spring Security path in `authplane-spring` emits the full RFC 6750 / RFC 9728 challenge — including the configured URL.
+
 ## 8. Token revocation checking
 
 By default, tokens are validated offline (signature + claims only). Two opt-in modes are available:
@@ -179,6 +207,14 @@ AuthplaneMcpSetup setup = AuthplaneMcpSetup.builder()
 ```
 
 The introspection endpoint is discovered from AS metadata. If the endpoint returns `active=false`, the token is rejected. **Fails open** on transport errors.
+
+The `ASCredentials` client must be confidential (a public client cannot introspect at all) and must be either the client the token was issued to or a runtime-client of the Resource named in `aud`; authserver ≥ 0.1.2 answers `{"active": false}` to everyone else, which rejects every token as revoked. Register the MCP server on its Resource with:
+
+```bash
+authserver admin resource runtime-client add --client-id <rs-client-id> --slug <resource-slug>
+```
+
+The checker warns at construction when no `authProvider` is set, and once when `active=false` comes back for a token that already passed local JWT verification.
 
 ### Custom checker
 
@@ -237,6 +273,26 @@ new SyncToolSpecification(
 Feature A (token exchange, in the core SDK) surfaces consent as a typed `ConsentRequiredException` (a subclass of `TokenExchangeException`) carrying `consentUrl`, `serviceId`, and `causeDetail`. Feature B (URL elicitation, in the MCP adapter) translates that exception into the MCP-specific `-32042` response with the consent URL, an elicitation ID, and a human-readable message.
 
 Always wrap any tool handler that triggers token exchange — otherwise the `ConsentRequiredException` bubbles as a generic error and the client never learns about the consent URL.
+
+### Other exchange errors
+
+Two sibling subtypes of `TokenExchangeException` are not consent problems, so the wrapper does not turn them into elicitation and re-prompting the user will not help:
+
+- `AccessDeniedException` (`access_denied`, HTTP 403): on a cross-client exchange, the operator has not allowlisted this MCP server's client on the target Resource. Fix the Resource policy (below).
+- `InvalidTargetException` (`invalid_target`, HTTP 400, RFC 8707 §2.2): the `resource` string does not match a granted resource exactly — a trailing slash is enough. Send the identifier byte for byte as granted.
+
+Neither counts toward the circuit breaker.
+
+### Operator step: allowlist the exchanging client
+
+For each MCP server that exchanges for a downstream resource it does not itself act as, allowlist its client ID on that Resource:
+
+```http
+PATCH /admin/resources/{id}
+{"policy": {"exchange": {"allowed_client_ids": ["<exchanging-client-id>"]}}}
+```
+
+A client exchanging a token issued to itself, fronted exchanges, and Broker resources need nothing.
 
 ### Using the helper directly
 

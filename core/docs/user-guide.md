@@ -125,7 +125,8 @@ List<String> scopes = claims.scopes();
 | `CompletableFuture<VerificationResult> verify(String token, VerificationRequestContext context)` | `CompletableFuture<VerificationResult>` | Verify a JWT and apply inbound DPoP validation when configured |
 | `Map<String, Object> prmResponse()` | `Map<String, Object>` | RFC 9728 Protected Resource Metadata document for this resource |
 | `String prmPath()` | `String` | URL path at which this resource's RFC 9728 PRM document should be served |
-| `String prmUrl()` | `String` | Absolute URL of this resource's RFC 9728 PRM document, for the `resource_metadata` challenge parameter (returned verbatim — not header-escaped) |
+| `String prmUrl()` | `String` | Absolute URL of the resource-hosted RFC 9728 PRM document, always derived from the resource identifier (returned verbatim — not header-escaped) |
+| `String resourceMetadataUrl()` | `String` | URL to advertise in the `resource_metadata` challenge parameter: the configured override, else `prmUrl()` (returned verbatim — not header-escaped) |
 | `String resourceUri()` | `String` | The scoped resource URI |
 | `List<String> scopes()` | `List<String>` | The configured scope list |
 | `AuthplaneClient client()` | `AuthplaneClient` | The parent client |
@@ -157,7 +158,7 @@ Immutable snapshot of the validated claims. Accessor names match the record comp
 | `boolean hasClaim(String key)` | Check presence of any raw claim |
 | `boolean hasClaim(String key, Object value)` | Check a raw claim equals the expected value |
 | `Map<String, Object> act()` | `act` (actor) claim, or `null` |
-| `Map<String, Object> mayAct()` | `may_act` claim, or `null` |
+| `Map<String, Object> mayAct()` | **Deprecated** — authserver 0.2.0 no longer issues `may_act`; removed in the next minor. Returns the claim, or `null` |
 | `Map<String, Object> cnf()` | `cnf` claim as an immutable map, or `Map.of()` |
 | `boolean hasCnf()` | True when the token carries a `cnf` claim |
 | `boolean isDpopBound()` | True when `cnf.jkt` is present and non-blank |
@@ -235,6 +236,7 @@ Per-resource configuration. Supply to `client.resource(resourceUri, scopes, opti
 | `allowedAlgorithms(List<String>)` | `["RS256", "ES256"]` | JWT signing algorithms; only `RS256` and `ES256` (asymmetric) are supported, `none` and HMAC (HS256/384/512) are always rejected |
 | `clockSkewSeconds(int)` | `30` | Leeway applied to `exp`, `nbf`, `iat` |
 | `inboundDPoP(InboundDPoPOptions)` | `null` | Enables inbound DPoP proof validation |
+| `resourceMetadataUrl(String)` | derived | Advertises this URL in the `resource_metadata` challenge parameter instead of the derived, resource-hosted one; must be an absolute `http(s)` URL naming a host, with no fragment, no userinfo, and a valid RFC 3986 query |
 | `useBuiltinRevocationChecker()` | disabled | Enables RFC 7662 introspection-based revocation checking; mutually exclusive with `revocationChecker(...)` |
 | `revocationChecker(RevocationChecker)` | `null` | Plug in a custom checker (e.g. Redis blocklist); mutually exclusive with `useBuiltinRevocationChecker()` |
 | `failClosed()` | fail-open | Reject tokens if the revocation check throws |
@@ -285,6 +287,14 @@ AuthplaneResource verifier = client.resource(resourceUri, scopes, options);
 ```
 
 Uses the client's metadata cache to discover the introspection endpoint, the client's AS credentials for HTTP Basic auth, and the client's SSRF-safe transport. **Fails open** by default on transport or endpoint errors. Add `.failClosed()` to reject tokens when the checker throws.
+
+**Who may introspect (authserver ≥ 0.1.2).** The client behind `ASCredentials` must be confidential (a public client cannot introspect at all) and must be either the client the token was issued to or a runtime-client of the Resource named in `aud`. Anyone else gets `{"active": false}`, so a resource server introspecting with the wrong credentials rejects every token as revoked. Register the resource server on its Resource with:
+
+```bash
+authserver admin resource runtime-client add --client-id <rs-client-id> --slug <resource-slug>
+```
+
+The checker logs a warning at construction when the client has no `AuthProvider`, and once when introspection answers `active: false` for a token that already passed local JWT verification.
 
 ### Custom revocation checker
 
@@ -347,6 +357,25 @@ TokenResponse exchanged = client.exchange(
 | `audience(String)` / `audiences(List<String>)` | Audience claim for the exchanged token |
 | `actorToken(String)` | Actor token for delegation (RFC 8693 §2.1) |
 | `actorTokenType(String)` | Actor token type URN |
+
+##### Exchange errors
+
+All three are subtypes of `TokenExchangeException`, and none of them trips the circuit breaker — the AS answered correctly:
+
+- `ConsentRequiredException` (`consent_required` / `interaction_required`): the user has not granted the downstream service; surface `consentUrl()` and retry after consent.
+- `AccessDeniedException` (`access_denied`, HTTP 403): on a cross-client exchange, the operator has not allowlisted the exchanging client on the target Resource. Re-prompting the user will not fix it — the Resource policy must change (next section).
+- `InvalidTargetException` (`invalid_target`, HTTP 400, RFC 8707 §2.2): the `resource` string does not match a granted resource exactly — a trailing slash or a different scheme is enough. Send the resource identifier byte for byte as it was granted.
+
+##### Operator step: allowlist the exchanging client
+
+For each MCP server that exchanges for a downstream resource it does not itself act as, allowlist its client ID on that Resource:
+
+```http
+PATCH /admin/resources/{id}
+{"policy": {"exchange": {"allowed_client_ids": ["<exchanging-client-id>"]}}}
+```
+
+A client exchanging a token issued to itself, fronted exchanges, and Broker resources need nothing.
 
 #### Token cache behaviour
 
@@ -469,6 +498,29 @@ Well-known path derivation:
 | `https://api.example.com/mcp` | `/.well-known/oauth-protected-resource/mcp` |
 | `https://api.example.com/v2/mcp` | `/.well-known/oauth-protected-resource/v2/mcp` |
 
+#### Where the PRM document lives
+
+The document can be hosted in either of two places, and the resource decides which one its challenges point at:
+
+| Topology | Who serves the document | What the challenge advertises |
+|---|---|---|
+| Resource-hosted (default) | This server, at `prmPath()` | `prmUrl()` — the derived `<resource origin>/.well-known/oauth-protected-resource[/path]` |
+| AS-hosted | The authorization server, which publishes one document per registered resource (authserver 0.2.0 and later serves `<issuer>/.well-known/oauth-protected-resource/{ref}`, `ref` being the RFC 9728 §3.1 path suffix of the resource URI, or its slug) | The URL configured via `ResourceOptions.builder().resourceMetadataUrl(...)` |
+
+Use the second when the resource server cannot serve well-known paths — a platform that owns them, or a gateway that routes only the resource path. Nothing else changes: the SDK still derives `prmPath()`/`prmUrl()`, and `resourceMetadataUrl()` is what adapters put in the challenge.
+
+Whichever you pick, RFC 9728 §3.3 binds the document to the identifier: the `resource` member the client reads must equal, byte for byte, the identifier it derived the metadata request from. The resource URI registered at the authorization server, the `resourceUri` configured here, and the URL clients actually call therefore all have to be the same string — a trailing slash, a different host, or an extra path segment makes it a different resource and the client discards the document.
+
+```java
+ResourceOptions options = ResourceOptions.builder()
+        .resourceMetadataUrl("https://auth.example.com/.well-known/oauth-protected-resource/mcp")
+        .build();
+AuthplaneResource resource = client.resource("https://mcp.example.com/mcp", scopes, options);
+
+resource.resourceMetadataUrl();  // the AS-hosted URL above — what challenges advertise
+resource.prmUrl();               // still the derived https://mcp.example.com/.well-known/...
+```
+
 `ProtectedResourceMetadata.wellKnownUrl(String resourceUri)` returns the full URL. If the resource identifier carries a query component, the returned URL carries it verbatim (`https://api.example.com/mcp?tenant=a` → `https://api.example.com/.well-known/oauth-protected-resource/mcp?tenant=a`) while routing stays path-keyed — the derivation table above is unaffected. The framework adapters (`authplane-mcp`, `authplane-spring`) register the servlet/router automatically — this is only needed when writing your own adapter.
 
 ### Dev mode
@@ -501,6 +553,8 @@ All SDK exceptions extend `AuthplaneException` (unchecked).
 | `MetadataFetchException` | 503 | Metadata endpoint unreachable or missing `jwks_uri` |
 | `TokenExchangeException` | 500 | AS token / exchange / introspection / revocation call failed |
 | `ConsentRequiredException` | 500 | Token exchange needs user consent (subtype of `TokenExchangeException`); carries an optional `consentUrl` to drive the consent flow |
+| `AccessDeniedException` | 500 | AS returned `access_denied` (subtype of `TokenExchangeException`): the exchanging client is not allowlisted on the target Resource |
+| `InvalidTargetException` | 500 | AS returned `invalid_target` (subtype of `TokenExchangeException`): `resource` does not match a granted resource exactly |
 
 DPoP subclasses (all extend `DPoPException`):
 
@@ -532,6 +586,19 @@ try {
 ```
 
 `HttpStatus.of(AuthplaneException)` returns `401`, `403`, `500`, or `503` per the table above. `WwwAuthenticate.of(AuthplaneException)` produces an RFC 6750 header value using the `DPoP` scheme for DPoP errors and `Bearer` for everything else; `WwwAuthenticate.of(error, realm)` adds a realm; `WwwAuthenticate.of(error, ChallengeOptions)` additionally emits the `resource_metadata` (RFC 9728 §5.3) and `scope` (RFC 6750 §3) parameters. All parameter values are escaped for header safety.
+
+**`error_description` is fixed, not the exception message.** The challenge and the JSON body are both served to a caller who by definition has not authenticated, so the description is chosen by the `error` code:
+
+| `error` | `error_description` |
+|---|---|
+| `invalid_token` | `The access token is missing or not valid for this resource` |
+| `insufficient_scope` | `The access token does not carry the scope this operation requires` |
+| `invalid_dpop_proof` | `The DPoP proof is missing or not valid for this request` |
+| anything else | `The request could not be authenticated` |
+
+The SDK's own messages name the failing detail — the unknown `kid`, the claim that did not validate, the `typ` that was rejected — and an audience mismatch would hand the caller the exact `aud` the resource expects, which is the value they would need in order to request a token for it. RFC 6750 §3 does not require `error_description` to be diagnostic; the `error` code already carries what a conforming client acts on. The message stays on the exception, so log it server-side.
+
+`WwwAuthenticate.of(error, options, true)` and `FailureResponse.of(error, options, true)` restore the message for local debugging — on both halves together, since an escape hatch that opened only one would let you believe the message was suppressed while it still shipped. They disclose SDK internals to unauthenticated callers; do not enable them in production.
 
 ### Fail-open vs fail-closed revocation
 

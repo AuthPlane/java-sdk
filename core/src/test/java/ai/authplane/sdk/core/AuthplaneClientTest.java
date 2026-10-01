@@ -411,6 +411,61 @@ class AuthplaneClientTest {
     }
 
     @Test
+    void resource_identifierThatNamesNoHost_throwsIAE() throws Exception {
+        // RFC 9728 §3 forms the metadata URL by inserting the well-known string after the host
+        // component, and the DPoP htu binding target is built from the same authority. An
+        // identifier with none used to construct cleanly and then bind every DPoP request to the
+        // literal origin "urn://null" — an htu mismatch naming a host that does not exist. The
+        // permissive reading came from RFC 8707 §2, which governs the resource *parameter* of a
+        // token request, a different axis from the identifier a resource server is configured with.
+        AuthplaneClient client = buildClient();
+        for (String identifier :
+                new String[] {"urn:example:api", "https:///mcp", "https://:8443/mcp"}) {
+            assertThatThrownBy(() -> client.resource(identifier, TestFixtures.SCOPES))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("does not name a host");
+        }
+        client.close();
+    }
+
+    @Test
+    void resourceConstructor_identifierThatNamesNoHost_throwsIAE() throws Exception {
+        // Same authoritative-line reasoning as the fragment, scheme and userinfo cases above:
+        // every other hostless identifier enters through client.resource(...), which throws at its
+        // own gate first, so without this test the constructor's gate is the line no test pins.
+        AuthplaneClient client = buildClient();
+        assertThatThrownBy(
+                        () ->
+                                new AuthplaneResource(
+                                        client,
+                                        "urn:example:api",
+                                        TestFixtures.SCOPES,
+                                        ResourceOptions.defaults()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("does not name a host");
+        client.close();
+    }
+
+    @Test
+    void resource_identifiersThatNameAHost_stillConstruct() throws Exception {
+        // The gate turns away identifiers that name no host, not everything that is not a bare
+        // https host: a development host on a port, an IPv6 literal, a percent-escape in the
+        // registered name and a query all still construct and are published verbatim.
+        AuthplaneClient client = buildClient();
+        for (String identifier :
+                new String[] {
+                    "http://localhost:8080/mcp",
+                    "https://[::1]:8443/mcp",
+                    "https://a%2Db.example.com/mcp",
+                    "https://api.example.com/mcp?tenant=acme",
+                }) {
+            assertThat(client.resource(identifier, TestFixtures.SCOPES).prmResponse())
+                    .containsEntry("resource", identifier);
+        }
+        client.close();
+    }
+
+    @Test
     void resource_hostWithPort_isAccepted() throws Exception {
         // A ':' in the authority is a port delimiter far more often than a userinfo one, so the
         // userinfo gate must not be a bare scan for ':'. An ordinary host:port identifier still

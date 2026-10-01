@@ -4,6 +4,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
@@ -164,6 +165,62 @@ class AuthplaneMcpSetupTest {
         assertThat(b.jwksRefreshSeconds(600)).isSameAs(b);
         assertThat(b.metadataRefreshSeconds(7200)).isSameAs(b);
         assertThat(b.revocationChecker(RevocationChecker.noOp())).isSameAs(b);
+        assertThat(b.resourceMetadataUrl("http://localhost:9000/prm")).isSameAs(b);
+    }
+
+    // -----------------------------------------------------------------------
+    // Advertised PRM URL (AS-hosted topology)
+    // -----------------------------------------------------------------------
+
+    @Test
+    void build_noResourceMetadataUrl_advertisesTheDerivedUrl() throws Exception {
+        AuthplaneMcpSetup setup =
+                AuthplaneMcpSetup.builder()
+                        .issuer(baseUrl)
+                        .resource(baseUrl + "/mcp")
+                        .scopes(List.of("tools/query"))
+                        .devMode(true)
+                        .build()
+                        .get();
+
+        assertThat(setup.resource().resourceMetadataUrl())
+                .isEqualTo(setup.resource().prmUrl())
+                .isEqualTo(baseUrl + "/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
+    void build_resourceMetadataUrl_reachesTheResource() throws Exception {
+        // The AS hosts the document; the servlet this setup can still register is unaffected, so
+        // prmPath() keeps naming the resource-hosted route.
+        String asHosted = baseUrl + "/.well-known/oauth-protected-resource/mcp";
+        AuthplaneMcpSetup setup =
+                AuthplaneMcpSetup.builder()
+                        .issuer(baseUrl)
+                        .resource("http://mcp.internal:8080/mcp")
+                        .scopes(List.of("tools/query"))
+                        .devMode(true)
+                        .resourceMetadataUrl(asHosted)
+                        .build()
+                        .get();
+
+        assertThat(setup.resource().resourceMetadataUrl()).isEqualTo(asHosted);
+        assertThat(setup.prmPath()).isEqualTo("/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
+    void build_invalidResourceMetadataUrl_failsTheBuild() {
+        assertThatThrownBy(
+                        () ->
+                                AuthplaneMcpSetup.builder()
+                                        .issuer(baseUrl)
+                                        .resource(baseUrl + "/mcp")
+                                        .scopes(List.of("tools/query"))
+                                        .devMode(true)
+                                        .resourceMetadataUrl("not-a-url")
+                                        .build()
+                                        .get())
+                .hasRootCauseInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("resourceMetadataUrl");
     }
 
     @Test

@@ -15,6 +15,21 @@ name: Conformance catalog drift
 # on drift so the run turns red and the `::warning::` plus job-summary line are
 # not buried in an otherwise-green run — prompting a coordinated ref bump plus
 # SDK-side coverage.
+#
+# The job runs TWO checks, because they see different things:
+#
+#   1. Case-id alignment against the tip. Reports cases added to the catalog
+#      that this SDK does not yet cover, and mappings pointing at case ids the
+#      catalog no longer has. This is a set comparison over ids.
+#
+#   2. Case-body drift for the cases this SDK registers. Reports a case that was
+#      re-tightened *in place* — same id, changed requirement. Check 1 is blind
+#      to this by construction: the id set is unchanged, so the case still looks
+#      adopted while the requirement underneath it has moved, and the SDK keeps
+#      declaring conformance to wording nothing verified it against. That has
+#      already happened once, to the metadata jwks_uri rotation case. Check 2
+#      needs the catalog at *both* refs in the same job, which is why the pinned
+#      catalog is checked out here alongside the tip.
 
 on:
   schedule:
@@ -65,27 +80,141 @@ jobs:
           CONFORMANCE_CATALOG_PATH: ${{ runner.temp }}/conformance/oauth-sdk-conformance-catalog.yaml
         run: mvn -B -ntp -pl core test -Dtest=ConformanceCatalogTest
 
+      # Snapshot what the alignment step actually found, before anything else
+      # runs. The evidence `Report drift` classifies on is the surefire report
+      # for ConformanceCatalogTest, and surefire keeps exactly one report file
+      # per test class and rewrites it in place. The pinned-catalog run below is
+      # the whole core module — ConformanceCatalogTest included, since
+      # src/conformance/java is a test-source root of that module — so it
+      # re-runs the same class against the pinned catalog, where it passes, and
+      # overwrites the drifted run's report. Reading the marker two Maven runs
+      # later would therefore find nothing on exactly the week this job exists
+      # to announce, and report real drift as a build problem while telling the
+      # reader not to touch the pin. Capturing it here is what keeps the two
+      # checks from destroying each other's evidence.
+      - name: Snapshot the alignment outcome
+        id: align_marker
+        if: always()
+        run: |
+          if grep -rqF 'Conformance-catalog drift:' core/target/surefire-reports 2>/dev/null; then
+            echo "marker=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "marker=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The catalog at the ref this repo *pins*, alongside the tip cloned above.
+      # The body check needs both to compare anything; with only the tip it
+      # would have nothing to compare against and could report nothing but
+      # green. Reuses the same checkout ci.yml and release.yml use — including
+      # its 40-hex-SHA guard and its unreachable-ref failure — rather than a
+      # third copy of that logic that could be tightened in one place and not
+      # the others. CONFORMANCE_CATALOG_DEST keeps it off the default path,
+      # which the tip clone above already occupies.
+      #
+      # Placed AFTER the alignment check, with `if: always()`, so the two checks
+      # fail independently. Run before `align`, a failed checkout — a transient
+      # network error, or a pinned SHA that has become unreachable — would skip
+      # `Setup Java` and `align` (neither carries an `if:`, so both default to
+      # `success()`) and silently drop the id-level check that ran on its own
+      # before check 2 existed. `Report drift` would then classify the skip as
+      # an infrastructure problem, which is the wrong diagnosis for a check that
+      # never started.
+      - name: Check out pinned conformance catalog (outside workspace)
+        if: always()
+        env:
+          CONFORMANCE_CATALOG_DEST: ${{ runner.temp }}/conformance-pinned
+        run: .github/scripts/fetch-conformance-catalog.sh
+
+      # The ids for check 2. They come from the harness's own report rather than
+      # from a grep over the test sources, so they cannot disagree with what
+      # actually registered.
+      #
+      # Run against the PINNED catalog, not the tip. The question the body check
+      # asks is "which cases does this SDK declare conformance to under its
+      # current pin", and anchoring the list to the pin keeps it stable while the
+      # tip moves. It also keeps this step independent of the alignment step,
+      # which is EXPECTED to go red whenever the tip has drifted — hence
+      # `if: always()` here too.
+      - name: Collect the case ids this SDK registers
+        if: always()
+        env:
+          CONFORMANCE_CATALOG_PATH: ${{ runner.temp }}/conformance-pinned/oauth-sdk-conformance-catalog.yaml
+        run: |
+          # Delete the report the alignment step wrote against the TIP catalog.
+          # If the run below fails to produce a new one, the id script must find
+          # nothing rather than silently read the earlier step's report and
+          # describe the wrong catalog.
+          rm -f "$GITHUB_WORKSPACE/conformance-report.json"
+
+          # The whole core suite, not `-Dtest=ConformanceCatalogTest`: the
+          # report records a case as registered when a test carrying its
+          # @ConformanceCase annotation runs, so a filtered run would leave
+          # every case it skipped looking uncovered.
+          status=0
+          mvn -B -ntp -pl core test > "$RUNNER_TEMP/pinned-suite.log" 2>&1 || status=$?
+          if [ "$status" -ne 0 ]; then
+            # Not this job's signal to raise: a suite that fails against its own
+            # pinned catalog is red on every PR in ci.yml already. Surfaced, and
+            # the id list still comes from THIS run's report, never an older one.
+            echo "::warning::The conformance suite did not pass against the pinned catalog (exit $status). This job reports catalog drift, not suite health — see ci.yml. Log tail follows."
+            tail -n 40 "$RUNNER_TEMP/pinned-suite.log"
+          fi
+
+          "$GITHUB_WORKSPACE/.github/scripts/conformance-registered-case-ids.sh" \
+            > "$RUNNER_TEMP/registered-case-ids.txt"
+          echo "This SDK registers $(wc -l < "$RUNNER_TEMP/registered-case-ids.txt") conformance case(s)."
+
+      # Check 2. Fails the job when a case this SDK registers changed body
+      # between the pinned ref and the tip, and fails just as loudly when it
+      # cannot do that comparison at all.
+      - name: Check pinned case bodies against the catalog tip
+        id: bodies
+        if: always()
+        env:
+          PINNED_CATALOG: ${{ runner.temp }}/conformance-pinned/oauth-sdk-conformance-catalog.yaml
+          TIP_CATALOG: ${{ runner.temp }}/conformance/oauth-sdk-conformance-catalog.yaml
+          REGISTERED_IDS: ${{ runner.temp }}/registered-case-ids.txt
+          COVERAGE_DIR: core/src/conformance/java/
+        run: |
+          DRIFT_SUMMARY="$GITHUB_STEP_SUMMARY" \
+            .github/scripts/conformance-case-body-drift.sh
+
       # Runs even when the alignment step fails the job, so the `::warning::`
       # and job summary are always written on drift. A `failure` outcome alone
       # does not mean drift — the step also fails on a compile error, a Maven
       # resolution failure, or a failure of the other test in the class. Real
       # drift is identified by the `Conformance-catalog drift:` marker the
-      # assertion writes into the surefire report; anything else that failed the
-      # step is reported as an infrastructure problem, as are skipped/cancelled
-      # outcomes (the alignment step never ran because an earlier step failed).
+      # assertion writes into the surefire report, read from the snapshot taken
+      # right after that step rather than from the report directory, which later
+      # steps overwrite; anything else that failed the step is reported as an
+      # infrastructure problem, as are skipped/cancelled outcomes (the alignment
+      # step never ran because an earlier step failed).
+      #
+      # The body check is recorded here too, and on success as well as failure.
+      # It prints its own detail into the step summary only when it finds
+      # something, so without this line a green run would say nothing about it
+      # at all — and a check whose silence is indistinguishable from its absence
+      # is how this class of drift went unnoticed in the first place.
       - name: Report drift
         if: always()
         run: |
           pinned="$(cat "$GITHUB_WORKSPACE/.conformance-catalog-ref")"
           grep -Eq '^[0-9a-f]{40}$' <<<"$pinned" \
             || { echo "::error::.conformance-catalog-ref must be a 40-hex commit SHA"; exit 1; }
+
+          if [ "${{ steps.bodies.outcome }}" = "success" ]; then
+            echo "Conformance case bodies: no registered case changed shape under an unchanged id." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::The pinned case-body check did not pass (outcome: ${{ steps.bodies.outcome }}). Either a case this SDK registers was re-tightened under the same id, or the check could not run. Read its step log — it names the case."
+          fi
+
           case "${{ steps.align.outcome }}" in
             success)
               echo "No conformance-catalog drift detected against the latest catalog." >> "$GITHUB_STEP_SUMMARY"
               echo "Pinned ref: \`$pinned\`" >> "$GITHUB_STEP_SUMMARY"
               ;;
             failure)
-              if grep -rqF 'Conformance-catalog drift:' core/target/surefire-reports 2>/dev/null; then
+              if [ "${{ steps.align_marker.outputs.marker }}" = "true" ]; then
                 echo "::warning::Conformance-catalog drift: the catalog-alignment check fails against the latest catalog. New or changed cases exist since the pinned ref ($pinned). Review github.com/AuthPlane/conformance, add SDK-side coverage, then bump .conformance-catalog-ref."
                 {
                   echo "### ⚠️ Conformance-catalog drift detected"
@@ -96,7 +225,7 @@ jobs:
                   echo "**Next steps:** review [AuthPlane/conformance](https://github.com/AuthPlane/conformance), add SDK-side coverage for any new cases, then bump \`.conformance-catalog-ref\` in the same change."
                 } >> "$GITHUB_STEP_SUMMARY"
               else
-                echo "::warning::The catalog-alignment step failed without the drift marker (no 'Conformance-catalog drift:' in the surefire report). This is a build or harness problem — a compile error, a Maven resolution failure, or the other test in the class — not catalog drift."
+                echo "::warning::The catalog-alignment step failed without the drift marker (no 'Conformance-catalog drift:' in its surefire report). This is a build or harness problem — a compile error, a Maven resolution failure, or the other test in the class — not catalog drift."
                 {
                   echo "### ⚠️ Conformance drift check failed for another reason"
                   echo ""

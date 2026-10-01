@@ -257,21 +257,33 @@ public class DocumentCache {
     }
 
     private Map<String, Object> doForceRefresh(boolean ignoreFailureBackoff) throws Exception {
-        // tryLock, for the same reason {@link #get()} uses it: this is a request-path caller. The
-        // backoff above keeps a *failing* endpoint from costing a fetch per request, but it does
-        // nothing for the burst that arrives before the first failure records retryNotBefore —
-        // those would all queue on an exclusive lock for one HTTP timeout. A caller that finds a
-        // fetch already in flight is served the document currently held; the two methods now
-        // agree that no request-path caller blocks on another thread's fetch.
-        Map<String, Object> inFlight = cachedDocument;
-        if (inFlight != null && !fetchLock.tryLock()) {
-            LOG.fine(() -> documentType + " refresh in flight elsewhere; serving the current copy");
-            return inFlight;
-        }
-        if (inFlight == null) {
-            fetchLock.lock();
-        }
+        // Block, then re-check — deliberately not the tryLock {@link #get()} uses. get()'s caller
+        // wants *a* document, so the copy in hand is a valid answer. This caller wants a *newer*
+        // one: JwksCache.getKeyByKid(kid, true) reaches forceRefresh() precisely because the held
+        // document does not carry the kid. Returning that same document while a fetch is in
+        // flight guarantees the lookup finds nothing, so every concurrent kid-miss caller would
+        // see a spurious invalid_token for the length of every healthy rotation's fetch window.
+        //
+        // Blocking is bounded by the fetch already running, and the re-check is what keeps the
+        // burst cheap: whoever holds the lock publishes, and everyone waiting behind it returns
+        // that document instead of fetching again. A failing endpoint records retryNotBefore, so
+        // the backoff below short-circuits the queue on the way out. One fetch per burst, not one
+        // per caller.
+        Map<String, Object> before = cachedDocument;
+        fetchLock.lock();
         try {
+            Map<String, Object> current = cachedDocument;
+            if (before != null && current != before) {
+                // Another thread's fetch landed while we waited. That is what we came for; a
+                // second round trip now would be the amplification the backoff exists to stop.
+                LOG.fine(
+                        () ->
+                                documentType
+                                        + " was refreshed by another thread while waiting; serving"
+                                        + " that document");
+                return current;
+            }
+
             long now = nowEpochSeconds();
             if (!ignoreFailureBackoff
                     && cachedDocument != null
@@ -388,25 +400,23 @@ public class DocumentCache {
      *
      * <p>A server expiry at or before the moment the document was cached is treated as <em>no
      * preference</em> rather than as an expiry, and the configured interval governs. It has to be:
-     * {@code CacheHeaderParser.parseExpiresAt} returns {@code 0L} for {@code Cache-Control:
-     * no-store} or {@code no-cache}, {@code now} for {@code max-age=0}, and a past epoch for a
-     * stale {@code Expires:} — and subtracting {@code cachedAtEpochSeconds} from any of those
-     * yields a negative TTL. For {@code no-store} that is about -1.7e9.
+     * {@code CacheHeaderParser.parseExpiresAt} returns {@code now} for {@code max-age=0} and a past
+     * epoch for a stale {@code Expires:} — and subtracting {@code cachedAtEpochSeconds} from either
+     * leaves nothing to honour. {@code Cache-Control: no-store} and {@code no-cache} used to arrive
+     * as {@code 0L}, which made the subtraction about -1.7e9; they now return {@code null} and no
+     * longer reach this guard, which still clamps them defensively.
      *
      * <p>A negative TTL makes {@code age >= effectiveTtl} true on every read, so {@link #get()}
      * takes the synchronous re-fetch branch on the caller's thread every single time, forever. The
      * failure backoff does not cover it, because that only arms when a fetch *throws*: an endpoint
-     * that answers {@code no-store} successfully clears the backoff and re-arms the expiry on the
-     * same call.
+     * that answered {@code no-store} successfully cleared the backoff and re-armed the expiry on
+     * the same call.
      *
      * <p>That was harmless while nothing on a verification path read this cache. It stopped being
      * harmless when metadata moved onto that path — verification now reads through here before
      * every key lookup, and that runs before signature verification, so an unauthenticated caller
      * would set the rate. This is the same failure the backoff was added to remove, reached by a
      * different door.
-     *
-     * <p>go-sdk clamps the equivalent case the same way: a zero expiry falls back to the configured
-     * default rather than being taken literally.
      */
     private long effectiveTtlSeconds() {
         if (serverExpiresAtSeconds != null && serverExpiresAtSeconds > cachedAtEpochSeconds) {

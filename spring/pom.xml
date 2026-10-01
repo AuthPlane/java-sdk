@@ -146,8 +146,8 @@
     </dependency>
 
     <!--
-      Spring test fixtures (MockHttpServletRequest/Response) — used to drive the PRM
-      RouterFunction with a real request. Pinned to ${spring.version} with spring-webmvc.
+      Spring test fixtures (MockHttpServletRequest/Response) — used to drive
+      the PRM RouterFunction with a real request. Same version as spring-webmvc.
     -->
     <dependency>
       <groupId>org.springframework</groupId>

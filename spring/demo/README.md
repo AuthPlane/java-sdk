@@ -183,7 +183,7 @@ HTTP/1.1 401 Unauthorized
 WWW-Authenticate: Bearer resource_metadata="http://localhost:8080/.well-known/oauth-protected-resource/mcp"
 Content-Type: application/json
 
-{"error":"invalid_token","error_description":"Bearer token is missing or invalid"}
+{"error":"invalid_token","error_description":"The access token is missing or not valid for this resource"}
 ```
 
 ### Insufficient scope (403)

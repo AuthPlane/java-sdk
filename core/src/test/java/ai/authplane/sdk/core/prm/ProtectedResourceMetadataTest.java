@@ -281,24 +281,32 @@ class ProtectedResourceMetadataTest {
     }
 
     @Test
-    void urnStyleResource_isAccepted() {
-        // RFC 8707 §2 permits non-http(s) resource indicators. A urn: identifier must not be
-        // rejected by any http(s)+authority validator — it is stored verbatim.
-        var prm =
-                ProtectedResourceMetadata.builder()
-                        .resource("urn:example:api")
-                        .authorizationServer("https://auth.example.com")
-                        .build();
-        assertThat(prm.getResource()).isEqualTo("urn:example:api");
-        assertThat(prm.toMap().get("resource")).isEqualTo("urn:example:api");
+    void urnStyleResource_isRejectedAtConstruction() {
+        // RFC 8707 §2 permits any absolute URI as the resource *parameter* of a token request, and
+        // an opaque identifier used to construct here on that reading. It does not survive: the
+        // identifier is also the origin of the DPoP htu binding target, which reads a null
+        // authority as the literal text "null", so "urn:example:api" bound every request to
+        // "urn://null" — accepted at construction and unusable at the sink. The gate now closes at
+        // construction, where RFC 9728 §3 applies: the metadata URL is formed by inserting the
+        // well-known string after the host component, so there has to be a host.
+        assertThatThrownBy(
+                        () ->
+                                ProtectedResourceMetadata.builder()
+                                        .resource("urn:example:api")
+                                        .authorizationServer("https://auth.example.com")
+                                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("does not name a host")
+                .hasMessageContaining("no authority component");
     }
 
     @Test
     void urnStyleResource_cannotDeriveAPrmUrl() {
-        // The identifier is stored verbatim (above), but there is no PRM URL to derive from an
-        // opaque URI: it has no authority and no hierarchical path. Deriving anyway produced
-        // "urn://null/.well-known/oauth-protected-resource", which AuthplaneResource.prmUrl()
-        // hands straight to the resource_metadata parameter of the 401 challenge.
+        // Construction rejects an opaque identifier (above), so this pins what the derivation
+        // helpers still answer on their own: they are public and reachable with a string no
+        // constructor saw. Deriving anyway produced "urn://null/.well-known/oauth-protected-
+        // resource", which AuthplaneResource.prmUrl() hands straight to the resource_metadata
+        // parameter of the 401 challenge.
         assertThatThrownBy(
                         () ->
                                 ProtectedResourceMetadata.wellKnownPath(
@@ -355,8 +363,9 @@ class ProtectedResourceMetadataTest {
 
     @Test
     void requireScheme_acceptsAnyAbsoluteUri() {
-        // Scheme only — not scheme+host. An opaque absolute URI constructs (stored verbatim);
-        // whether it can derive a PRM URL is the derivation gate's question.
+        // This gate answers one question and only that one: is there a scheme. An opaque absolute
+        // URI clears it and is then rejected by requireAuthority, which runs immediately after at
+        // every construction site — so each message names the half that is actually missing.
         ProtectedResourceMetadata.requireScheme("https://api.example.com/mcp");
         ProtectedResourceMetadata.requireScheme("urn:example:api");
         ProtectedResourceMetadata.requireScheme("custom+v1.2-x://host/path");
@@ -408,6 +417,92 @@ class ProtectedResourceMetadataTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must not include a fragment component")
                 .satisfies(e -> assertThat(e.getMessage()).doesNotContain("secret"));
+    }
+
+    @Test
+    void requireAuthority_rejectsIdentifiersThatNameNoHost() {
+        // The construction gate for the other half of an absolute hierarchical identifier. Every
+        // shape here reaches AuthplaneResource.normalizeRequestUrl with a null or hostless
+        // authority, which splices the literal text "null" (or a bare port) into the DPoP htu
+        // binding target — measured: "urn:example:api" produced the origin "urn://null".
+        for (String identifier :
+                new String[] {
+                    "urn:example:api", // opaque: no authority at all
+                    "mailto:ops@example.com", // opaque, and the '@' is not userinfo
+                    "https:example.com/mcp", // hierarchical-looking, but no "//" opens an authority
+                    "https:///mcp", // empty authority
+                    "https://:8443/mcp", // a port and no host
+                    "https://@:8443/mcp", // an '@' and a port, but nothing between them
+                }) {
+            assertThatThrownBy(() -> ProtectedResourceMetadata.requireAuthority(identifier))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("does not name a host");
+        }
+    }
+
+    @Test
+    void requireAuthority_acceptsIdentifiersThatNameAHost() {
+        // The gate must not simply reject everything that is not a bare https host: a port, an
+        // IPv6 literal (whose own colons sit inside the brackets, so the port separator is looked
+        // for after the ']'), a percent-escape in the registered name and a query all name a host.
+        ProtectedResourceMetadata.requireAuthority("https://api.example.com/mcp");
+        ProtectedResourceMetadata.requireAuthority("https://api.example.com:8443/mcp");
+        ProtectedResourceMetadata.requireAuthority("http://localhost:8080/mcp");
+        ProtectedResourceMetadata.requireAuthority("https://[::1]:8443/mcp");
+        ProtectedResourceMetadata.requireAuthority("https://[::1]/mcp");
+        ProtectedResourceMetadata.requireAuthority("https://a%2Db.example.com/mcp");
+        ProtectedResourceMetadata.requireAuthority("https://api.example.com/mcp?tenant=acme");
+        ProtectedResourceMetadata.requireAuthority("https://api.example.com");
+
+        // Scheme-relative: it does name a host, so this gate is not the one that rejects it.
+        // requireScheme, which runs immediately before at every call site, is.
+        ProtectedResourceMetadata.requireAuthority("//api.example.com/mcp");
+    }
+
+    @Test
+    void requireAuthority_errorMessage_elidesUserinfo() {
+        // The message renders the identifier, and a hostless authority can still carry a
+        // credential ("https://svc:pw@/mcp" is what a template with an empty host variable
+        // produces). Same discipline as every sibling gate: the userinfo never reaches a log.
+        assertThatThrownBy(
+                        () -> ProtectedResourceMetadata.requireAuthority("https://svc:s3cr3t@/mcp"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("does not name a host")
+                .hasMessageContaining("***@/mcp")
+                .satisfies(e -> assertThat(e.getMessage()).doesNotContain("s3cr3t"));
+    }
+
+    @Test
+    void requireAuthority_null_throwsNamedNpe() {
+        assertThatThrownBy(() -> ProtectedResourceMetadata.requireAuthority(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("resourceUri");
+    }
+
+    @Test
+    void builder_rejectsAnIdentifierWithAnEmptyAuthority() {
+        assertThatThrownBy(
+                        () ->
+                                ProtectedResourceMetadata.builder()
+                                        .resource("https:///mcp")
+                                        .authorizationServer("https://auth.example.com")
+                                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("does not name a host");
+    }
+
+    @Test
+    void builder_reportsTheMissingSchemeBeforeTheMissingHost() {
+        // Gate order: a scheme-relative reference names a host, so it is reported for the scheme;
+        // an identifier missing both is reported for the scheme, which an operator fixes first.
+        assertThatThrownBy(
+                        () ->
+                                ProtectedResourceMetadata.builder()
+                                        .resource("mcp")
+                                        .authorizationServer("https://auth.example.com")
+                                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("has no scheme");
     }
 
     @Test

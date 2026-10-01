@@ -1,11 +1,13 @@
 package ai.authplane.sdk.core;
 
+import java.net.URI;
 import java.util.List;
 import java.util.Objects;
 
 import ai.authplane.sdk.core.dpop.InboundDPoPOptions;
 import ai.authplane.sdk.core.dpop.VerificationRequestContext;
 import ai.authplane.sdk.core.errors.TokenRevokedException;
+import ai.authplane.sdk.core.prm.ProtectedResourceMetadata;
 
 /**
  * Per-resource configuration beyond the required resource and scopes.
@@ -32,6 +34,7 @@ public final class ResourceOptions {
     private final boolean useBuiltinRevocationChecker;
     private final boolean failClosed;
     private final InboundDPoPOptions inboundDPoP;
+    private final String resourceMetadataUrl;
 
     private ResourceOptions(Builder builder) {
         this.allowedAlgorithms = List.copyOf(builder.allowedAlgorithms);
@@ -40,6 +43,7 @@ public final class ResourceOptions {
         this.useBuiltinRevocationChecker = builder.useBuiltinRevocationChecker;
         this.failClosed = builder.failClosed;
         this.inboundDPoP = builder.inboundDPoP;
+        this.resourceMetadataUrl = builder.resourceMetadataUrl;
     }
 
     /** Default options: RS256+ES256, 30s clock skew, no revocation checking. */
@@ -98,6 +102,15 @@ public final class ResourceOptions {
         return inboundDPoP;
     }
 
+    /**
+     * The URL the {@code resource_metadata} parameter of a {@code WWW-Authenticate} challenge
+     * points at, or {@code null} (the default) to advertise the resource-hosted document the SDK
+     * derives from the resource identifier. See {@link Builder#resourceMetadataUrl(String)}.
+     */
+    public String resourceMetadataUrl() {
+        return resourceMetadataUrl;
+    }
+
     /** Builder for constructing {@link ResourceOptions} instances. */
     public static final class Builder {
 
@@ -107,6 +120,7 @@ public final class ResourceOptions {
         private boolean useBuiltinRevocationChecker = false;
         private boolean failClosed = false;
         private InboundDPoPOptions inboundDPoP = null;
+        private String resourceMetadataUrl = null;
 
         private Builder() {}
 
@@ -130,6 +144,95 @@ public final class ResourceOptions {
         public Builder inboundDPoP(InboundDPoPOptions options) {
             this.inboundDPoP = Objects.requireNonNull(options, "options must not be null");
             return this;
+        }
+
+        /**
+         * Points the {@code resource_metadata} parameter of every {@code WWW-Authenticate}
+         * challenge at {@code url} instead of the resource-hosted RFC 9728 document the SDK derives
+         * from the resource identifier ({@code <resource
+         * origin>/.well-known/oauth-protected-resource[/path]}).
+         *
+         * <p>Set this when the document lives somewhere else — typically the copy the authorization
+         * server publishes for a registered resource — and the resource server cannot, or does not
+         * want to, serve the well-known path itself. The document that URL returns must still carry
+         * the exact resource identifier this resource is configured with as its {@code resource}
+         * member (RFC 9728 §3.3), or clients discard it.
+         *
+         * <p>The URL must be absolute, with an {@code http} or {@code https} scheme and a host, no
+         * fragment, no userinfo, and a query that is a valid RFC 3986 §3.4 query. Plain {@code
+         * http} is accepted on any host: the derived PRM URL this value replaces is not
+         * scheme-narrowed either.
+         *
+         * @param url absolute URL of the Protected Resource Metadata document
+         * @throws IllegalArgumentException if {@code url} is not an absolute http(s) URL naming a
+         *     host, or carries a fragment, userinfo, or an out-of-grammar query
+         */
+        public Builder resourceMetadataUrl(String url) {
+            Objects.requireNonNull(url, "url must not be null");
+            this.resourceMetadataUrl = requireAbsoluteHttpUrl(url);
+            return this;
+        }
+
+        /**
+         * Shape gate for {@link #resourceMetadataUrl(String)}: the value is spliced verbatim into a
+         * header that reaches unauthenticated callers, so anything that is not an absolute {@code
+         * http(s)} URL naming a host is refused where the operator wrote it rather than advertised.
+         *
+         * <p>{@code http} is accepted on any host, with no comparison against the resource
+         * identifier's own scheme: the derived PRM URL this value replaces is not scheme-narrowed
+         * either, and a narrower gate refuses the in-cluster and docker-compose topologies dev mode
+         * exists to serve.
+         *
+         * <p>The userinfo, fragment and query gates are the identifier's own, reused verbatim: this
+         * value reaches the same {@code resource_metadata} sink the identifier does, and {@code
+         * URI.getHost()} is non-null for {@code https://svc:secret@host/x}, so without them a
+         * credential in the authority would be advertised in every 401 and 403. The query gate is
+         * the one {@code URI.create} cannot stand in for — it rejects only space, {@code "}, {@code
+         * \}, {@code |}, {@code ^}, <code>{</code>, <code>}</code>, {@code <} and {@code >}, so a
+         * raw non-ASCII octet would otherwise ship into the header. Their messages elide secrets,
+         * which is why the failure is re-reported around them rather than through {@link
+         * #rejection(String, String)} — that one embeds the raw value.
+         */
+        private static String requireAbsoluteHttpUrl(String url) {
+            try {
+                ProtectedResourceMetadata.requireNoFragment(url);
+                ProtectedResourceMetadata.requireValidQuery(url);
+                ProtectedResourceMetadata.requireNoUserinfo(url);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException(
+                        "resourceMetadataUrl is not usable as the resource_metadata parameter of a"
+                                + " WWW-Authenticate challenge: "
+                                + e.getMessage(),
+                        e);
+            }
+            URI uri;
+            try {
+                uri = URI.create(url);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException(rejection(url, "it does not parse as a URI"), e);
+            }
+            String scheme = uri.getScheme();
+            if (scheme == null) {
+                throw new IllegalArgumentException(rejection(url, "it has no scheme"));
+            }
+            if (!"https".equalsIgnoreCase(scheme) && !"http".equalsIgnoreCase(scheme)) {
+                throw new IllegalArgumentException(
+                        rejection(url, "its scheme is \"" + scheme + "\", not http or https"));
+            }
+            if (uri.getHost() == null || uri.getHost().isBlank()) {
+                throw new IllegalArgumentException(rejection(url, "it names no host"));
+            }
+            return url;
+        }
+
+        private static String rejection(String url, String reason) {
+            return "resourceMetadataUrl \""
+                    + url
+                    + "\" is not usable as the resource_metadata parameter of a WWW-Authenticate"
+                    + " challenge: "
+                    + reason
+                    + ". Configure the absolute URL clients should fetch the RFC 9728 document"
+                    + " from, e.g. https://auth.example.com/.well-known/oauth-protected-resource/mcp.";
         }
 
         /**

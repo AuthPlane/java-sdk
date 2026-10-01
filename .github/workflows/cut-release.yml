@@ -282,8 +282,17 @@ jobs:
           labels: release,automated
           delete-branch: true
 
+      # Best-effort. Auto-merge requires `allow_auto_merge` on the repository,
+      # which GitHub gates behind a paid plan for a private repo — this one is
+      # on the free plan, so the call fails and without this guard it took the
+      # whole job down after the cut had already done its work. ts-sdk and
+      # cs-sdk carry the same guard. The summary below reads this step's outcome
+      # rather than assuming it failed, so it stays accurate wherever this
+      # workflow is ported.
       - name: Enable auto-merge on bump PR
+        id: automerge
         if: steps.validate.outputs.mode == 'release' && steps.cpr.outputs.pull-request-number
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --auto --squash
@@ -294,6 +303,14 @@ jobs:
           v="${{ steps.validate.outputs.release }}"
           branch="${{ steps.validate.outputs.branch }}"
           mode="${{ steps.validate.outputs.mode }}"
+          case "${{ steps.automerge.outcome }}" in
+            success) bumpNote="bump PR opened — auto-merge armed"
+                     bumpStep="Confirm the bump PR against \`$default\` merged: auto-merge was armed on it." ;;
+            skipped) bumpNote="no bump PR opened"
+                     bumpStep="No bump PR was opened, so \`$default\` still targets its current version — bump it by hand if that is wrong." ;;
+            *)       bumpNote="bump PR opened — merge it manually"
+                     bumpStep="Merge the bump PR against \`$default\` by hand: auto-merge did not arm, which needs \`allow_auto_merge\` on the repository." ;;
+          esac
           {
             if [[ "$mode" == "hotfix" ]]; then
               echo "### Hotfix branch cut"
@@ -310,10 +327,12 @@ jobs:
               echo ""
               echo "- **Release version**: \`$v\`"
               echo "- **Branch**: \`$branch\` (version \`${{ steps.validate.outputs.releaseSnapshot }}\`)"
-              echo "- **Next dev version on \`$default\`**: \`${{ steps.validate.outputs.nextDev }}\` (auto-merge PR opened)"
+              echo "- **Next dev version on \`$default\`**: \`${{ steps.validate.outputs.nextDev }}\` ($bumpNote)"
               echo ""
               echo "**Next steps**:"
               echo "1. On \`$branch\`: rename \`## [Unreleased]\` to \`## [$v]\` (or add a new dated entry), land any stabilization fixes."
               echo "2. When ready, run the **Release** workflow from \`$branch\` (optionally with dry-run first)."
+              echo "3. $bumpStep"
+              echo "4. After publication, copy the \`## [$v]\` section from tag \`v$v\` back onto \`$default\` verbatim, and delete from \`$default\`'s \`[Unreleased]\` every bullet that section now carries — the rename in step 1 happens only on the release branch and nothing back-merges it, so \`$default\` otherwise never records the release and re-announces those bullets at the next cut. Copy from the tag, not \`$branch\`: **Release** deletes the branch once publication succeeds."
             fi
           } >> "$GITHUB_STEP_SUMMARY"

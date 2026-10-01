@@ -320,7 +320,15 @@ class AuthplaneMcpServerAdapterTest {
                             ServerTransportSecurityException se =
                                     (ServerTransportSecurityException) e;
                             assertThat(se.getStatusCode()).isEqualTo(401);
-                            assertThat(se.getMessage()).contains("Multiple DPoP");
+                            // The transport renders this message to the caller, so it is the
+                            // fixed per-code sentence, not core's "Multiple DPoP …". The
+                            // extract() test below still pins the raw message, which surfaces
+                            // to the host application rather than to the wire.
+                            assertThat(se.getMessage())
+                                    .isEqualTo(
+                                            "The DPoP proof is missing or not valid for this"
+                                                    + " request");
+                            assertThat(se.getMessage()).doesNotContain("Multiple DPoP");
                         });
     }
 

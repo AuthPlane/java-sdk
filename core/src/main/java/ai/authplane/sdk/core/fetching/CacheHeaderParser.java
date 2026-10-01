@@ -13,8 +13,7 @@ import java.util.logging.Logger;
  * configured interval governs. That is what {@code no-store} and {@code no-cache} return: they say
  * the response should not be reused, which for a document this SDK must keep serving is not an
  * expiry it can honour — the caller falls back to its own interval rather than treating the
- * document as permanently stale. Both siblings model it the same way, as go's zero {@code
- * time.Time} and ts's {@code undefined}.
+ * document as permanently stale.
  *
  * <p>A non-null return is an absolute expiry, and {@code DocumentCache} shortens its configured TTL
  * to it when it is in the future. An expiry already in the past — a stale {@code Expires:}, or

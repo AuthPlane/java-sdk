@@ -102,6 +102,29 @@ class AuthplaneMcpServerConfigTest {
         assertThat(v.prmResponse()).containsEntry("resource", baseUrl + "/mcp");
     }
 
+    @Test
+    void resourceMetadataUrlProperty_isAdvertisedInsteadOfTheDerivedUrl() throws Exception {
+        // This config carries its own copy of the three-line wiring, which is exactly why it needs
+        // its own assertion: nothing else catches the branch being dropped or inverted in one file.
+        AuthplaneClient client = buildClient(0);
+        AuthplaneResource v =
+                buildVerifier(
+                        client,
+                        false,
+                        "https://auth.example.com/.well-known/oauth-protected-resource/mcp");
+
+        assertThat(v.resourceMetadataUrl())
+                .isEqualTo("https://auth.example.com/.well-known/oauth-protected-resource/mcp");
+    }
+
+    @Test
+    void resourceMetadataUrlProperty_blank_derivesTheResourceHostedUrl() throws Exception {
+        AuthplaneClient client = buildClient(0);
+        AuthplaneResource v = buildVerifier(client, false, "");
+
+        assertThat(v.resourceMetadataUrl()).isEqualTo(v.prmUrl());
+    }
+
     // -----------------------------------------------------------------------
     // Credentials (AuthProvider bean)
     // -----------------------------------------------------------------------
@@ -307,6 +330,12 @@ class AuthplaneMcpServerConfigTest {
 
     /** Calls authplaneVerifier() with the given client and introspection flag. */
     private AuthplaneResource buildVerifier(AuthplaneClient client, boolean introspectionEnabled) {
+        return buildVerifier(client, introspectionEnabled, "");
+    }
+
+    /** Calls authplaneVerifier() with an explicit authplane.resource-metadata-url. */
+    private AuthplaneResource buildVerifier(
+            AuthplaneClient client, boolean introspectionEnabled, String resourceMetadataUrl) {
         return config.authplaneResource(
                 client,
                 baseUrl + "/mcp", // resource
@@ -314,6 +343,7 @@ class AuthplaneMcpServerConfigTest {
                 List.of("RS256"),
                 30, // clockSkewSeconds
                 introspectionEnabled,
+                resourceMetadataUrl,
                 revocationCheckerProvider,
                 inboundDPoPProvider);
     }

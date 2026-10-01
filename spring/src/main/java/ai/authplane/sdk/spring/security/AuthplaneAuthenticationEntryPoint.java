@@ -32,7 +32,8 @@ public final class AuthplaneAuthenticationEntryPoint implements AuthenticationEn
     private final AuthplaneResource resource;
 
     /**
-     * @param resource the resource being protected (supplies the {@code resource_metadata} URL)
+     * @param resource the resource being protected (supplies the {@code resource_metadata} URL,
+     *     derived or configured via {@code authplane.resource-metadata-url})
      */
     public AuthplaneAuthenticationEntryPoint(AuthplaneResource resource) {
         this.resource = Objects.requireNonNull(resource, "resource must not be null");
@@ -50,9 +51,14 @@ public final class AuthplaneAuthenticationEntryPoint implements AuthenticationEn
                         ? ae
                         : new TokenMissingException("Bearer token is missing or invalid");
 
+        // resourceMetadataUrl(), not prmUrl(): the resource decides which RFC 9728 topology it is
+        // in — document served here, or served by the AS and only pointed at — and every challenge
+        // this entry point renders (401, and 403 for insufficient_scope) reads that one decision.
         FailureResponse.Challenge challenge =
                 FailureResponse.of(
-                        error, ChallengeOptions.empty().withResourceMetadataUrl(resource.prmUrl()));
+                        error,
+                        ChallengeOptions.empty()
+                                .withResourceMetadataUrl(resource.resourceMetadataUrl()));
 
         response.setStatus(challenge.status());
         response.setHeader("WWW-Authenticate", challenge.wwwAuthenticate());

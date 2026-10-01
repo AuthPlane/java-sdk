@@ -6,7 +6,9 @@ import java.util.Map;
 import com.nimbusds.jose.util.JSONObjectUtils;
 
 import ai.authplane.sdk.core.TokenResponse;
+import ai.authplane.sdk.core.errors.AccessDeniedException;
 import ai.authplane.sdk.core.errors.ConsentRequiredException;
+import ai.authplane.sdk.core.errors.InvalidTargetException;
 import ai.authplane.sdk.core.errors.TokenExchangeException;
 import ai.authplane.sdk.core.fetching.RawPostResponse;
 
@@ -42,6 +44,12 @@ final class TokenResponseParser {
                 Object causeObj = result.get("cause");
                 String causeDetail = causeObj instanceof String c && !c.isBlank() ? c : desc;
                 throw new ConsentRequiredException(desc, error, serviceId, causeDetail, consentUrl);
+            }
+            if ("access_denied".equals(error)) {
+                throw new AccessDeniedException(desc);
+            }
+            if ("invalid_target".equals(error)) {
+                throw new InvalidTargetException(desc);
             }
             throw new TokenExchangeException(desc, error);
         }

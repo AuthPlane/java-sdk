@@ -48,10 +48,19 @@ class ASCredentialsTest {
     }
 
     @Test
-    void constructor_emptyClientSecret_succeeds() {
-        // Empty secret is allowed — some AS allow empty secrets
-        ASCredentials creds = new ASCredentials("my-client", "");
-        assertThat(creds.clientSecret()).isEmpty();
+    void constructor_emptyClientSecret_throwsIllegalArgumentException() {
+        // A public (secret-less) client cannot introspect: authserver >= 0.1.2 answers
+        // active=false to unauthenticated introspection, so reject at construction.
+        assertThatThrownBy(() -> new ASCredentials("my-client", ""))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("clientSecret");
+    }
+
+    @Test
+    void constructor_blankClientSecret_throwsIllegalArgumentException() {
+        assertThatThrownBy(() -> new ASCredentials("my-client", "   "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("clientSecret");
     }
 
     @Test

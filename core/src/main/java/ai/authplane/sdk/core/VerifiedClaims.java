@@ -175,7 +175,10 @@ public record VerifiedClaims(
      * Returns the {@code may_act} claim as an immutable map, or {@code null} when absent.
      *
      * <p>Indicates which actors are authorized to act on behalf of the subject.
+     *
+     * @deprecated authserver 0.2.0 no longer issues {@code may_act}; removed in the next minor.
      */
+    @Deprecated(forRemoval = true)
     @SuppressWarnings("unchecked")
     public Map<String, Object> mayAct() {
         Object mayActClaim = raw.get("may_act");

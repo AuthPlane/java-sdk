@@ -25,7 +25,9 @@ import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import ai.authplane.sdk.core.ASCredentials;
 import ai.authplane.sdk.core.TokenExchangeOptions;
 import ai.authplane.sdk.core.TokenResponse;
+import ai.authplane.sdk.core.errors.AccessDeniedException;
 import ai.authplane.sdk.core.errors.ConsentRequiredException;
+import ai.authplane.sdk.core.errors.InvalidTargetException;
 import ai.authplane.sdk.core.errors.TokenExchangeException;
 import ai.authplane.sdk.core.fetching.FetchSettings;
 import ai.authplane.sdk.core.fetching.HttpTransport;
@@ -213,6 +215,54 @@ class TokenExchangeTest {
                             assertThat(cre.serviceId()).isEqualTo("profile");
                             assertThat(cre.causeDetail()).isEqualTo("User interaction required");
                             assertThat(cre.consentUrl()).isNull();
+                        });
+    }
+
+    @Test
+    void exchange_accessDenied_mapsToAccessDeniedException() throws Exception {
+        // authserver 0.2.0: cross-client exchange by a client that is not in the Resource's
+        // policy.exchange.allowed_client_ids.
+        wireMock.stubFor(
+                post(urlEqualTo("/token"))
+                        .willReturn(
+                                aResponse()
+                                        .withStatus(403)
+                                        .withHeader("Content-Type", "application/json")
+                                        .withBody(
+                                                "{\"error\":\"access_denied\","
+                                                        + "\"error_description\":\"client not allowed to exchange for this resource\"}")));
+
+        assertThatThrownBy(
+                        () -> TokenExchange.exchange(tokenUrl, defaultOptions(), null, transport))
+                .isInstanceOf(AccessDeniedException.class)
+                .satisfies(
+                        ex -> {
+                            AccessDeniedException ade = (AccessDeniedException) ex;
+                            assertThat(ade.oauthError()).isEqualTo("access_denied");
+                            assertThat(ade.getMessage())
+                                    .isEqualTo("client not allowed to exchange for this resource");
+                        });
+    }
+
+    @Test
+    void exchange_invalidTarget_mapsToInvalidTargetException() throws Exception {
+        // RFC 8707 §2.2: `resource` does not match a granted resource byte for byte.
+        wireMock.stubFor(
+                post(urlEqualTo("/token"))
+                        .willReturn(
+                                aResponse()
+                                        .withStatus(400)
+                                        .withHeader("Content-Type", "application/json")
+                                        .withBody("{\"error\":\"invalid_target\"}")));
+
+        assertThatThrownBy(
+                        () -> TokenExchange.exchange(tokenUrl, defaultOptions(), null, transport))
+                .isInstanceOf(InvalidTargetException.class)
+                .satisfies(
+                        ex -> {
+                            InvalidTargetException ite = (InvalidTargetException) ex;
+                            assertThat(ite.oauthError()).isEqualTo("invalid_target");
+                            assertThat(ite.getMessage()).isEqualTo("invalid_target");
                         });
     }
 

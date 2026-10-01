@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 AUTHSERVER_DIR="${AUTHSERVER_DIR:-$REPO_ROOT/../authserver}"
+AUTHSERVER_REF="${AUTHSERVER_REF:-}"
 
 usage() {
   cat <<'EOF'
@@ -12,6 +13,8 @@ Usage:
 
 Environment (optional):
   AUTHSERVER_DIR   Path to local authserver repo (default: ../authserver)
+  AUTHSERVER_REF   Git ref of authserver to check out before building, e.g. v0.2.0
+                   (default: leave the checkout as is)
 EOF
 }
 
@@ -25,13 +28,20 @@ if [ ! -d "${AUTHSERVER_DIR}" ]; then
   exit 1
 fi
 
-echo "==> Starting authserver demo server (client_credentials enabled)"
+if [ -n "${AUTHSERVER_REF}" ]; then
+  echo "==> Checking out authserver ${AUTHSERVER_REF}"
+  git -C "${AUTHSERVER_DIR}" fetch --tags --quiet
+  git -C "${AUTHSERVER_DIR}" checkout --quiet "${AUTHSERVER_REF}"
+  rm -f "${AUTHSERVER_DIR}/bin/authserver"
+fi
+
+echo "==> Starting authserver demo server"
 (
   cd "${AUTHSERVER_DIR}"
   if [ ! -x "bin/authserver" ]; then
     go build -o bin/authserver ./cmd/authserver
   fi
-  AUTHPLANE_CLIENT_CREDENTIALS_ENABLED=true ./demo/mcp-demo-server-start.sh
+  ./demo/mcp-demo-server-start.sh
 )
 
 echo ""

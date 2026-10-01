@@ -34,8 +34,6 @@ import ai.authplane.sdk.core.errors.WwwAuthenticate;
  */
 public final class AuthplaneAuthenticationProvider implements AuthenticationProvider {
 
-    private static final String GENERIC_DESCRIPTION = "Token validation failed";
-
     private final AuthplaneResource resource;
 
     /**
@@ -80,18 +78,22 @@ public final class AuthplaneAuthenticationProvider implements AuthenticationProv
      * (which only catches {@link AuthenticationException}) as an unhandled 500.
      */
     static OAuth2AuthenticationException toOAuth2Exception(Throwable cause) {
-        // Only SDK-owned exceptions get their message reflected back to the client. Anything else
-        // (transport NPE, downstream lib failure, …) may carry sensitive details in getMessage(),
-        // so we surface the generic description and let server-side logging hold the detail.
+        // No exception's message is reflected back to the client, SDK-owned or not. The SDK's own
+        // messages name the unknown kid, the claim that did not validate, or the aud the resource
+        // expects; the description is the fixed sentence for the code instead, and server-side
+        // logging holds the detail. The SDK's default wiring routes to
+        // AuthplaneAuthenticationEntryPoint, which discards both halves of this exception, but an
+        // application wiring this provider under Spring's own oauth2ResourceServer gets
+        // BearerTokenAuthenticationEntryPoint, which renders the OAuth2Error description straight
+        // into error_description — and with server.error.include-message=always the exception
+        // message reaches the error body too.
         String errorCode;
-        String description;
         if (cause instanceof AuthplaneException ae) {
             errorCode = WwwAuthenticate.errorCodeFor(ae);
-            description = ae.getMessage() != null ? ae.getMessage() : GENERIC_DESCRIPTION;
         } else {
             errorCode = "invalid_token";
-            description = GENERIC_DESCRIPTION;
         }
+        String description = WwwAuthenticate.descriptionFor(errorCode);
         return new OAuth2AuthenticationException(
                 new OAuth2Error(errorCode, description, null), description, cause);
     }

@@ -6,6 +6,8 @@ import java.io.IOException;
 
 import org.junit.jupiter.api.Test;
 
+import ai.authplane.sdk.core.errors.AccessDeniedException;
+import ai.authplane.sdk.core.errors.InvalidTargetException;
 import ai.authplane.sdk.core.errors.TokenExchangeException;
 import ai.authplane.sdk.core.fetching.ssrf.SsrfException;
 
@@ -23,6 +25,8 @@ class CircuitPolicyTest {
                     "invalid_grant",
                     "invalid_scope",
                     "invalid_request",
+                    "invalid_target",
+                    "access_denied",
                     "consent_required",
                     "interaction_required",
                     "invalid_dpop_proof",
@@ -32,6 +36,16 @@ class CircuitPolicyTest {
                     .as(code)
                     .isFalse();
         }
+    }
+
+    @Test
+    void accessDeniedAndInvalidTarget_typedExceptions_doNotTrip() {
+        // authserver 0.2.0 answers these when the exchanging client is not allowlisted on the
+        // Resource (403) or `resource` does not match a granted resource (400): not an outage.
+        assertThat(CircuitPolicy.shouldTrip(new AccessDeniedException("not allowlisted")))
+                .isFalse();
+        assertThat(CircuitPolicy.shouldTrip(new InvalidTargetException("resource mismatch")))
+                .isFalse();
     }
 
     @Test
