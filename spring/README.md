@@ -11,7 +11,7 @@ Authplane JWT authentication for [Spring Boot](https://spring.io/projects/spring
 <dependency>
   <groupId>ai.authplane.sdk</groupId>
   <artifactId>authplane-spring</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>0.3.0</version>
 </dependency>
 
 <!-- Required for the Spring Security integration path -->

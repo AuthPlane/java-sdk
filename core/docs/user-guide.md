@@ -19,7 +19,7 @@ The SDK is built around these RFCs:
 <dependency>
     <groupId>ai.authplane.sdk</groupId>
     <artifactId>authplane-sdk</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>0.3.0</version>
 </dependency>
 ```
 

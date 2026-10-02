@@ -34,7 +34,7 @@ Add the dependency to your `pom.xml`:
 <dependency>
   <groupId>ai.authplane.sdk</groupId>
   <artifactId>authplane-spring</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>0.3.0</version>
 </dependency>
 ```
 
