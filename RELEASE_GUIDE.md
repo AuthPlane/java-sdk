@@ -36,6 +36,7 @@ On `release/v<X.Y.Z>`:
 
 - Move content from `## [Unreleased]` in `CHANGELOG.md` into a new `## [<X.Y.Z>]` section.
 - Land any last-minute fixes (checkstyle, doc updates, etc.).
+- Set the install snippets to `<X.Y.Z>`: `core/README.md`, `mcp/README.md`, `spring/README.md` and the three `*/docs/user-guide.md`. No workflow rewrites them, so they go stale otherwise.
 
 > Why `-SNAPSHOT` during stabilization: a developer who runs `mvn install` from a release branch gets a clearly-snapshot artifact in their local Maven cache — Maven treats it as mutable and will re-fetch. If the branch carried the final `X.Y.Z` already, that artifact would be indistinguishable from the eventual Central-published version, and last-minute fixes wouldn't refresh anyone's local cache. `release.yml` strips the suffix and writes `X.Y.Z` in the same commit it tags.
 
