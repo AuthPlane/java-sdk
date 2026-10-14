@@ -11,7 +11,7 @@ Authplane JWT authentication for servers built on the [MCP Java SDK](https://git
 <dependency>
   <groupId>ai.authplane.sdk</groupId>
   <artifactId>authplane-mcp</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>0.3.0</version>
 </dependency>
 ```
 

@@ -11,7 +11,7 @@ Framework-agnostic OAuth 2.1 JWT validation and token operations for Java resour
 <dependency>
     <groupId>ai.authplane.sdk</groupId>
     <artifactId>authplane-sdk</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>0.3.0</version>
 </dependency>
 ```
 
